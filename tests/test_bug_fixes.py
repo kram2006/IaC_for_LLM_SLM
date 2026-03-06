@@ -13,10 +13,12 @@ if SRC_DIR not in sys.path:
 from eval_utils import extract_terraform_code
 from eval_utils import redact_sensitive_text as redact_eval_sensitive_text, redact_messages_for_logging
 from spec_checker import DeleteValidation
+from spec_checker import CreateValidation, ReadValidation, UpdateValidation
 from compute_metrics import compute_metrics_for_folder, calculate_pass_at_k
 from evaluate import _validate_local_path, load_config
 from spec_checker import get_plan_json
-from json_generator import redact_sensitive_text as redact_json_sensitive_text
+from json_generator import redact_sensitive_text as redact_json_sensitive_text, check_compliance
+from llm_judge import parse_verdict
 
 
 def test_extract_terraform_code_keeps_non_empty_when_language_line_has_no_newline():
@@ -133,3 +135,39 @@ def test_json_generator_redacts_system_prompt_text():
     redacted = redact_json_sensitive_text(raw)
     assert 'admin@admin.net' not in redacted
     assert 'password: admin' not in redacted
+
+
+def test_parse_verdict_does_not_misclassify_incorrect_suffix():
+    assert parse_verdict("Final assessment: incorrect") == "Incorrect"
+
+
+def test_check_compliance_handles_zero_expected_value():
+    assert check_compliance(actual=0, expected=0, default_min=1) is True
+    assert check_compliance(actual=1, expected=0, default_min=1) is False
+
+
+def test_create_validation_supports_min_max_vm_count():
+    validator = CreateValidation()
+    vm_resources = [{"action": "create"}, {"action": "create"}, {"action": "create"}]
+    specs = {"min_vm_count": 2, "max_vm_count": 4}
+    errors, checks, _ = validator.validate(vm_resources, specs)
+    assert errors == []
+    assert "min_vm_count" in checks
+    assert "max_vm_count" in checks
+
+
+def test_update_validation_rejects_create_delete_replace():
+    validator = UpdateValidation()
+    vm_resources = [{"action": "update", "memory_max": 10}, {"action": "replace"}]
+    specs = {"updated_field": "memory_max", "new_value": 10}
+    errors, _, details = validator.validate(vm_resources, specs)
+    assert any("should not create/delete/replace" in e for e in errors)
+    assert details.get("had_replace_actions") is True
+
+
+def test_read_validation_detects_non_vm_resource_changes():
+    validator = ReadValidation()
+    changes = [{"action": "update", "address": "xenorchestra_network.main"}]
+    errors, checks, _ = validator.validate(changes, {})
+    assert "no_resource_changes" in checks
+    assert any("must not modify infrastructure" in e for e in errors)

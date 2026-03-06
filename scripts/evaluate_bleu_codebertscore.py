@@ -105,24 +105,47 @@ def call_ollama(model: str, prompt: str, system_prompt: str = SYSTEM_PROMPT,
 
 # FOR OPENROUTER 
 def call_openrouter(model:str, prompt: str, system_prompt: str = SYSTEM_PROMPT, temperature: float = 0.7, max_tokens: int =20000) ->str:
-    response = requests.post(
-        url = "https://openrouter.ai/api/v1/chat/completions",
-        headers={
-            "Authorization": f"Bearer {OPENROUTER_API_KEY}"
-        }, 
-        data = json.dumps({
-            "model": model,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": prompt}
-            ],
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-            "stream": False
-        })
-    )
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": prompt}
+        ],
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "stream": False
+    }
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Content-Type": "application/json"
+    }
 
-    return response.json().get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+    for attempt in range(3):
+        try:
+            response = requests.post(
+                url="https://openrouter.ai/api/v1/chat/completions",
+                headers=headers,
+                json=payload,
+                timeout=60
+            )
+            if response.status_code == 429:
+                wait_seconds = (2 ** attempt)
+                logger.warning(f"OpenRouter rate-limited, retrying in {wait_seconds}s")
+                time.sleep(wait_seconds)
+                continue
+
+            response.raise_for_status()
+            body = response.json()
+            return body.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+        except requests.exceptions.RequestException as err:
+            logger.error(f"OpenRouter request failed: {err}")
+            if attempt == 2:
+                return ""
+            time.sleep(2 ** attempt)
+        except (ValueError, KeyError, TypeError) as err:
+            logger.error(f"OpenRouter response parsing failed: {err}")
+            return ""
+    return ""
 
 # There might be code explanations or other text before the actual code. 
 # This function extracts only the generated Terraform code. 
@@ -209,6 +232,10 @@ def compute_weighted_bleu(cd_tokens, ref_tokens, keywords, keyword_weight = 5):
     
     # Brevity Penalty
     c, r = len(cd_tokens), len(ref_tokens)
+    if c == 0:
+        return 0.0
+    if r == 0:
+        return p1
     bp = 1 if c > r else math.exp(1-r/c)
 
     weighted_bleu = bp * p1 

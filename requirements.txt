@@ -10,3 +10,12 @@ huggingface_hub
 docker
 pydantic
 aiohttp
+matplotlib
+sacrebleu
+rouge-score
+codebleu
+code-bert-score
+tree-sitter
+tree-sitter-hcl
+transformers
+torch

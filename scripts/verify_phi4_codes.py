@@ -1,10 +1,21 @@
 import json, glob
 from pathlib import Path
+import argparse
 
-BASE = Path(r"c:\Users\kalar\Downloads\llm_eval_RK\iac-eval-main")
-RESULTS = BASE / "results" / "dataset" / "Phi4_14B_Ollama_Results"
-TF_CODE = BASE / "results" / "terraform_code" / "Phi4_14B_Ollama_Results"
-OUT = BASE / "phi4_verify.json"
+parser = argparse.ArgumentParser(description="Verify Phi-4 generated code artifacts.")
+parser.add_argument("--base-dir", default=".", help="Project root directory")
+parser.add_argument("--results-dir", default="results/dataset/Phi4_14B_Ollama_Results", help="Results JSON directory")
+parser.add_argument("--tf-code-dir", default="results/terraform_code/Phi4_14B_Ollama_Results", help="Terraform code artifact directory")
+parser.add_argument("--out", default="phi4_verify.json", help="Output report JSON path")
+args = parser.parse_args()
+
+BASE = Path(args.base_dir)
+RESULTS = (BASE / args.results_dir).resolve()
+TF_CODE = (BASE / args.tf_code_dir).resolve()
+OUT = (BASE / args.out).resolve()
+
+if not RESULTS.exists():
+    raise FileNotFoundError(f"results directory not found: {RESULTS}")
 
 result_files = sorted(RESULTS.glob("*.json"))
 seen = set()

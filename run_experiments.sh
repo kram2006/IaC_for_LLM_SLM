@@ -5,7 +5,7 @@
 # Change directory to the python project root so relative paths like config/ open correctly
 cd "$(dirname "$0")"
 
-MODELS=("phi4_ollama" "phi4_openrouter" "qwen25coder_7b_ollama" "qwen25coder_openrouter" "codestral_openrouter" "mistral7b_lmstudio")
+MODELS=("phi4_ollama" "phi4_openrouter")
 SAMPLES=3
 SEED=42
 TASK_CSV="tasks/vm_provisioning_tasks.csv"
@@ -51,15 +51,14 @@ for MODEL in "${MODELS[@]}"; do
 done
 
 echo "====== EXPERIMENT 4: Full Apply - Best Models (edit list after Exp 1-3) ======"
-BEST_MODELS=("phi4_openrouter" "qwen25coder_openrouter" "codestral_openrouter")
+BEST_MODELS=("phi4_ollama" "phi4_openrouter")
 for MODEL in "${BEST_MODELS[@]}"; do
     echo "Running full apply chain for: $MODEL"
     python src/evaluate.py --config $CONFIG --model $MODEL --chain C1.3,U1.2,D1.2 --samples $SAMPLES --seed $SEED
-    python src/evaluate.py --config $CONFIG --model $MODEL --chain C2.3,D2.2 --samples $SAMPLES --seed $SEED
+    python src/evaluate.py --config $CONFIG --model $MODEL --chain C2.3,R1.2,D2.2 --samples $SAMPLES --seed $SEED
     python src/evaluate.py --config $CONFIG --model $MODEL --task_id C1.1 --samples $SAMPLES --seed $SEED --no-confirm
     python src/evaluate.py --config $CONFIG --model $MODEL --task_id C1.2 --samples $SAMPLES --seed $SEED --no-confirm
     python src/evaluate.py --config $CONFIG --model $MODEL --task_id C2.2 --samples $SAMPLES --seed $SEED --no-confirm
-    python src/evaluate.py --config $CONFIG --model $MODEL --task_id R1.2 --plan-only --samples $SAMPLES --seed $SEED --no-confirm
     python src/evaluate.py --config $CONFIG --model $MODEL --task_id C5.2 --plan-only --samples $SAMPLES --seed $SEED --no-confirm
 done
 

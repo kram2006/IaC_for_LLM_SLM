@@ -59,12 +59,7 @@ def _extract_vm_resources(plan_json):
         after = change.get('after', {}) or {}
         before = change.get('before', {}) or {}
         
-        if 'delete' in actions and 'create' in actions: action = 'replace'
-        elif 'delete' in actions: action = 'delete'
-        elif 'create' in actions: action = 'create'
-        elif 'update' in actions: action = 'update'
-        elif 'no-op' in actions: action = 'no-op'
-        else: action = actions[0] if actions else 'unknown'
+        action = _normalize_action(actions)
         
         disk_sizes = [d['size'] for d in after.get('disk', []) if isinstance(d, dict) and 'size' in d]
         
@@ -77,6 +72,31 @@ def _extract_vm_resources(plan_json):
             'name_label': after.get('name_label'),
             'disk_sizes': disk_sizes,
             'before': before
+        })
+    return resources
+
+def _normalize_action(actions):
+    if 'delete' in actions and 'create' in actions:
+        return 'replace'
+    if 'delete' in actions:
+        return 'delete'
+    if 'create' in actions:
+        return 'create'
+    if 'update' in actions:
+        return 'update'
+    if 'no-op' in actions:
+        return 'no-op'
+    return actions[0] if actions else 'unknown'
+
+def _extract_all_resource_changes(plan_json):
+    resources = []
+    for rc in plan_json.get('resource_changes', []):
+        change = rc.get('change', {})
+        actions = change.get('actions', [])
+        resources.append({
+            'action': _normalize_action(actions),
+            'address': rc.get('address', ''),
+            'type': rc.get('type', ''),
         })
     return resources
 
@@ -100,6 +120,17 @@ class CreateValidation(ValidationStrategy):
             checks.append('vm_count')
             if len(creates) != specs['vm_count']:
                 errors.append(f"SPEC ERROR: Expected {specs['vm_count']} VMs, found {len(creates)}.")
+        else:
+            min_count = specs.get('min_vm_count')
+            max_count = specs.get('max_vm_count')
+            if min_count is not None:
+                checks.append('min_vm_count')
+                if len(creates) < min_count:
+                    errors.append(f"SPEC ERROR: Expected at least {min_count} VMs, found {len(creates)}.")
+            if max_count is not None:
+                checks.append('max_vm_count')
+                if len(creates) > max_count:
+                    errors.append(f"SPEC ERROR: Expected at most {max_count} VMs, found {len(creates)}.")
         
         # Resource constraints (e.g. C5.2)
         if 'max_total_ram_gb' in specs:
@@ -128,13 +159,18 @@ class ReadValidation(ValidationStrategy):
     def validate(self, vm_resources, specs, pre_vms=None):
         changes = [r for r in vm_resources if r['action'] != 'no-op']
         if changes:
-            return [f"SPEC ERROR: READ task must not modify infrastructure. Found {len(changes)} changes."], ['no_resource_changes'], {}
+            addresses = [r.get('address') for r in changes[:3]]
+            return [f"SPEC ERROR: READ task must not modify infrastructure. Found {len(changes)} changes: {addresses}"], ['no_resource_changes'], {}
         return [], ['no_resource_changes'], {}
 
 class UpdateValidation(ValidationStrategy):
     def validate(self, vm_resources, specs, pre_vms=None):
         errors, checks, details = [], ['action_type_only_update'], {}
         updates = [r for r in vm_resources if r['action'] == 'update']
+        forbidden = [r for r in vm_resources if r['action'] in ('create', 'delete', 'replace')]
+        if forbidden:
+            details['had_replace_actions'] = any(r['action'] == 'replace' for r in forbidden)
+            errors.append(f"SPEC ERROR: UPDATE task should not create/delete/replace VMs (found {forbidden[0]['action']}).")
         
         if not updates:
             errors.append("SPEC ERROR: No update actions found in plan.")
@@ -192,15 +228,27 @@ def check_spec_accuracy(plan_json, task_data, pre_vms=None):
     task_id = task_data.get('task_id', '').strip()
     specs = _SPECS_MANAGER.get_specs().get(task_id)
     if not specs:
-        return {'passed': True, 'errors': [], 'details': {'note': 'No spec'}, 'checks_performed': []}
+        return {
+            'passed': False,
+            'errors': [f"SPEC ERROR: No spec found for task '{task_id}'."],
+            'details': {'note': 'No spec'},
+            'checks_performed': []
+        }
     
-    vm_resources = _extract_vm_resources(plan_json)
-    strategy = STRATEGIES.get(specs.get('category'))
+    category = specs.get('category')
+    strategy = STRATEGIES.get(category)
     
     if not strategy:
-        return {'passed': True, 'errors': [], 'details': {'note': 'Unknown category'}, 'checks_performed': []}
+        return {
+            'passed': False,
+            'errors': [f"SPEC ERROR: Unknown task category '{category}' for task '{task_id}'."],
+            'details': {'note': 'Unknown category'},
+            'checks_performed': []
+        }
+
+    resources = _extract_all_resource_changes(plan_json) if category == 'READ' else _extract_vm_resources(plan_json)
         
-    errors, checks, details = strategy.validate(vm_resources, specs, pre_vms)
+    errors, checks, details = strategy.validate(resources, specs, pre_vms)
     return {
         'passed': len(errors) == 0,
         'errors': errors,

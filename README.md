@@ -21,7 +21,7 @@ An automated evaluation framework for benchmarking Small Language Models (SLMs) 
 pip install -r requirements.txt
 
 # 2. Run unit tests to verify compliance logic
-python -m pytest tests/test_compliance.py
+python -m pytest tests/test_bug_fixes.py
 
 # 3. Set API Keys and Platform details in .env or config/openrouter_config.yaml
 export OPENROUTER_API_KEY="sk-or-v1-..."

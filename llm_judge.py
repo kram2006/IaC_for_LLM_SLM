@@ -20,7 +20,7 @@ import time
 import argparse
 import requests
 import re
-from utils import extract_terraform_code
+from src.eval_utils import extract_terraform_code
 
 # ─────────────────────────────────────────────────────────────────────────────
 # JUDGE PROMPT TEMPLATE
@@ -115,10 +115,10 @@ def parse_verdict(response_text):
         return verdict  # 'Correct' or 'Incorrect'
     # Fallback: look for the words at end of response
     lower = response_text.lower().strip()
-    if lower.endswith('correct') or 'rating: correct' in lower:
-        return 'Correct'
     if lower.endswith('incorrect') or 'rating: incorrect' in lower:
         return 'Incorrect'
+    if lower.endswith('correct') or 'rating: correct' in lower:
+        return 'Correct'
     return 'Unknown'
 
 

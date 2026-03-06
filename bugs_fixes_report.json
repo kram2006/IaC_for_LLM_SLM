@@ -1,0 +1,347 @@
+{
+  "audit_metadata": {
+    "mode": "report_only",
+    "repository": "https://github.com/kram2006/IaC_for_LLM_SLM",
+    "attachment_status": "No job assets found in runtime; IaC.pdf not available for in-environment parsing",
+    "files_scanned": "all non-git repository files"
+  },
+  "architecture": {
+    "core_pipeline": [
+      "src/evaluate.py",
+      "src/eval_core.py",
+      "src/api_client.py",
+      "src/eval_utils.py",
+      "src/spec_checker.py",
+      "src/xo_client.py",
+      "src/json_generator.py",
+      "src/compute_metrics.py"
+    ],
+    "dataset": [
+      "tasks/vm_provisioning_tasks.csv",
+      "config/task_specs.yaml",
+      "tasks/references/*.tf"
+    ]
+  },
+  "task_scope_validation": {
+    "task_count": 10,
+    "task_ids": [
+      "C1.1",
+      "C1.2",
+      "C1.3",
+      "C2.2",
+      "C2.3",
+      "R1.2",
+      "U1.2",
+      "D1.2",
+      "D2.2",
+      "C5.2"
+    ],
+    "provided_structure_present": true,
+    "automation_mismatch": "run_experiments.sh chain omits R1.2 in C2.3,R1.2,D2.2"
+  },
+  "issues": [
+    {
+      "id": "C-01",
+      "severity": "Critical",
+      "file": "llm_judge.py",
+      "line": "23",
+      "title": "Broken import",
+      "description": "Imports extract_terraform_code from non-existent utils module.",
+      "impact": "llm_judge cannot execute.",
+      "suggested_fix": "Import from src.eval_utils or add local helper with correct module path."
+    },
+    {
+      "id": "C-02",
+      "severity": "Critical",
+      "file": "src/evaluate.py + src/eval_core.py",
+      "line": "parallel sample execution",
+      "title": "Non-isolated pass@k sampling",
+      "description": "Parallel samples run against shared infrastructure and VM names.",
+      "impact": "Race conditions and invalid pass@k reliability.",
+      "suggested_fix": "Sequential apply-mode sampling or per-sample namespacing/sandbox isolation."
+    },
+    {
+      "id": "C-03",
+      "severity": "Critical",
+      "file": "src/eval_core.py",
+      "line": "task_artifact_dir/task_log_dir creation",
+      "title": "Artifact collisions",
+      "description": "Log/history dirs do not include sample number.",
+      "impact": "Overwritten/mixed logs across parallel runs.",
+      "suggested_fix": "Include sample_num in artifact path."
+    },
+    {
+      "id": "C-04",
+      "severity": "Critical",
+      "file": "src/xo_client.py",
+      "line": "verify_vms cache TTL",
+      "title": "Stale post-state verification",
+      "description": "Post-check can reuse pre-check cache for up to 10s.",
+      "impact": "False pass/fail in state verification.",
+      "suggested_fix": "Add force_refresh for post-checks or disable cache in correctness checks."
+    },
+    {
+      "id": "C-05",
+      "severity": "Critical",
+      "file": "run_experiments.sh",
+      "line": "58",
+      "title": "Chain definition mismatch",
+      "description": "Runs C2.3,D2.2; expected chain includes R1.2.",
+      "impact": "Experiment protocol drift.",
+      "suggested_fix": "Change chain to C2.3,R1.2,D2.2."
+    },
+    {
+      "id": "C-06",
+      "severity": "Critical",
+      "file": "run_experiments.sh + config/openrouter_config.yaml",
+      "line": "model keys",
+      "title": "Model config mismatch",
+      "description": "Script references model keys absent from config.",
+      "impact": "Experiment runner fails for missing models.",
+      "suggested_fix": "Align script model list with config or add missing configs."
+    },
+    {
+      "id": "H-01",
+      "severity": "High",
+      "file": "llm_judge.py",
+      "line": "118-121",
+      "title": "Verdict fallback misclassification",
+      "description": "Fallback checks can classify incorrect as correct due suffix overlap.",
+      "impact": "Wrong judge verdicts in edge responses.",
+      "suggested_fix": "Use strict regex or check Incorrect before Correct."
+    },
+    {
+      "id": "H-02",
+      "severity": "High",
+      "file": "README.md",
+      "line": "24",
+      "title": "Invalid test command",
+      "description": "References tests/test_compliance.py which does not exist.",
+      "impact": "Broken setup instructions.",
+      "suggested_fix": "Update to tests/test_bug_fixes.py or correct test target."
+    },
+    {
+      "id": "H-03",
+      "severity": "High",
+      "file": "src/spec_checker.py",
+      "line": "CreateValidation",
+      "title": "min/max VM count ignored",
+      "description": "Validator checks vm_count only; ignores min_vm_count/max_vm_count used by C1.1.",
+      "impact": "False positives for CREATE count constraints.",
+      "suggested_fix": "Support min/max bounds in CreateValidation."
+    },
+    {
+      "id": "H-04",
+      "severity": "High",
+      "file": "src/spec_checker.py",
+      "line": "UpdateValidation",
+      "title": "Forbidden update actions not blocked",
+      "description": "No explicit failure for create/delete/replace in UPDATE tasks.",
+      "impact": "Invalid update plans may pass.",
+      "suggested_fix": "Add forbidden action checks and target-specific validation."
+    },
+    {
+      "id": "H-05",
+      "severity": "High",
+      "file": "src/spec_checker.py",
+      "line": "_extract_vm_resources + ReadValidation",
+      "title": "READ validation blind spot",
+      "description": "Only xenorchestra_vm changes are considered.",
+      "impact": "Non-VM resource mutations can slip through READ checks.",
+      "suggested_fix": "Inspect all plan resource changes for READ tasks."
+    },
+    {
+      "id": "H-06",
+      "severity": "High",
+      "file": "src/eval_core.py",
+      "line": "322-325",
+      "title": "Plan-only may pass when spec extraction fails",
+      "description": "Spec skipped can still evaluate as successful in plan-only mode.",
+      "impact": "False pass in partial failure scenarios.",
+      "suggested_fix": "Fail evaluation or mark indeterminate when terraform show JSON fails."
+    },
+    {
+      "id": "H-07",
+      "severity": "High",
+      "file": "src/evaluate.py + src/api_client.py",
+      "line": "api key resolution",
+      "title": "Placeholder key not rejected",
+      "description": "Unresolved ${OPENROUTER_API_KEY} can propagate as literal.",
+      "impact": "Late opaque authentication failures.",
+      "suggested_fix": "Reject unresolved placeholder strings before API call setup."
+    },
+    {
+      "id": "H-08",
+      "severity": "High",
+      "file": "src/json_generator.py",
+      "line": "final_outcome fields",
+      "title": "meets_requirements not tied to spec pass",
+      "description": "meets_requirements mirrors execution_successful logic.",
+      "impact": "Overstates functional correctness.",
+      "suggested_fix": "Derive from execution_successful AND spec_accuracy.passed (with explicit edge-case policy)."
+    },
+    {
+      "id": "H-09",
+      "severity": "High",
+      "file": "requirements.txt",
+      "line": "dependency manifest",
+      "title": "Incomplete dependencies",
+      "description": "Several scripts use packages not listed in requirements.",
+      "impact": "Many tools fail on clean install.",
+      "suggested_fix": "Add missing dependencies or split core/optional extras requirements."
+    },
+    {
+      "id": "H-10",
+      "severity": "High",
+      "file": "scripts/*",
+      "line": "multiple",
+      "title": "Hardcoded Windows absolute paths",
+      "description": "Scripts are tied to c:\\Users\\... paths.",
+      "impact": "Non-portable execution and frequent FileNotFound failures.",
+      "suggested_fix": "Replace with CLI args + relative paths + env-driven defaults."
+    },
+    {
+      "id": "M-01",
+      "severity": "Medium",
+      "file": "scripts/evaluate_qwen_vs_claude_official.py",
+      "line": "load_data()",
+      "title": "Missing input guard",
+      "description": "No existence check before opening comparison dataset.",
+      "impact": "Immediate crash when file missing.",
+      "suggested_fix": "Validate path and print actionable error."
+    },
+    {
+      "id": "M-02",
+      "severity": "Medium",
+      "file": "scripts/verify_dataset.py",
+      "line": "top-level file/dir opens",
+      "title": "Unguarded filesystem assumptions",
+      "description": "Opens files/list dirs without preflight checks.",
+      "impact": "Crash outside expected folder layout.",
+      "suggested_fix": "Add exists checks and explicit diagnostics."
+    },
+    {
+      "id": "M-03",
+      "severity": "Medium",
+      "file": "scripts/setup_official_metrics.py",
+      "line": "extractall + HTTP URL",
+      "title": "Archive extraction and transport security risk",
+      "description": "Uses tar.extractall without traversal checks and HTTP METEOR URL.",
+      "impact": "Potential supply-chain/path traversal risk.",
+      "suggested_fix": "Use safe extraction guard + HTTPS/checksum verification."
+    },
+    {
+      "id": "M-04",
+      "severity": "Medium",
+      "file": "scripts/evaluate_bleu_codebertscore.py",
+      "line": "call_openrouter",
+      "title": "Weak API error handling",
+      "description": "No timeout/status handling or retry logic.",
+      "impact": "Silent/fragile failures during model calls.",
+      "suggested_fix": "Add timeout, raise_for_status, retries, structured failure returns."
+    },
+    {
+      "id": "M-05",
+      "severity": "Medium",
+      "file": "scripts/evaluate_bleu_codebertscore.py",
+      "line": "compute_weighted_bleu",
+      "title": "Potential division by zero",
+      "description": "Brevity penalty computes r/c without explicit c==0 guard.",
+      "impact": "Runtime error for empty candidate token lists.",
+      "suggested_fix": "Return 0.0 when candidate length is zero."
+    },
+    {
+      "id": "M-06",
+      "severity": "Medium",
+      "file": "src/compute_metrics.py + src/evaluate.py",
+      "line": "lockfile protocol",
+      "title": "Expected lockfile never generated",
+      "description": "Metrics script waits on lockfile that evaluator never creates.",
+      "impact": "False assumption of synchronization state.",
+      "suggested_fix": "Create/remove .evaluation_in_progress in evaluator lifecycle."
+    },
+    {
+      "id": "M-07",
+      "severity": "Medium",
+      "file": "src/spec_checker.py",
+      "line": "check_spec_accuracy",
+      "title": "Silent pass for unknown specs/categories",
+      "description": "Missing or unknown strategy currently returns passed=True.",
+      "impact": "Spec enforcement can be bypassed silently.",
+      "suggested_fix": "Return warning status or fail in strict mode."
+    },
+    {
+      "id": "M-08",
+      "severity": "Medium",
+      "file": "src/json_generator.py",
+      "line": "check_compliance",
+      "title": "Truthiness bug",
+      "description": "Uses if expected instead of explicit None check.",
+      "impact": "Incorrect behavior when expected value is 0.",
+      "suggested_fix": "Use expected is not None."
+    },
+    {
+      "id": "M-09",
+      "severity": "Medium",
+      "file": "src/json_generator.py",
+      "line": "scenario.system_prompt",
+      "title": "Prompt metadata mismatch",
+      "description": "Stores config.system_prompt but evaluator often uses baseline_system_prompt.",
+      "impact": "Incomplete experiment metadata provenance.",
+      "suggested_fix": "Use same prompt-resolution logic as src/eval_core.py."
+    }
+  ],
+  "recommended_edit_targets": [
+    "README.md",
+    "run_experiments.sh",
+    "config/openrouter_config.yaml",
+    "llm_judge.py",
+    "src/evaluate.py",
+    "src/eval_core.py",
+    "src/spec_checker.py",
+    "src/xo_client.py",
+    "src/json_generator.py",
+    "src/compute_metrics.py",
+    "requirements.txt",
+    "scripts/compute_metrics.py",
+    "scripts/consolidate_results.py",
+    "scripts/evaluate_bleu_codebertscore.py",
+    "scripts/evaluate_phi4_vs_each.py",
+    "scripts/evaluate_qwen_vs_claude_official.py",
+    "scripts/inject_phi4_into_dataset.py",
+    "scripts/setup_official_metrics.py",
+    "scripts/verify_dataset.py",
+    "scripts/verify_phi4_codes.py"
+  ],
+  "verification_runs": [
+    {
+      "command": "python -m pytest -q",
+      "result": "13 passed"
+    },
+    {
+      "command": "python verify_fixes.py",
+      "result": "7/7 verification checks passed"
+    },
+    {
+      "command": "python -m compileall -q .",
+      "result": "passed"
+    },
+    {
+      "command": "python llm_judge.py --help",
+      "result": "failed: ModuleNotFoundError (utils)"
+    },
+    {
+      "command": "python scripts/evaluate_qwen_vs_claude_official.py",
+      "result": "failed: hardcoded path FileNotFoundError"
+    },
+    {
+      "command": "python scripts/consolidate_results.py",
+      "result": "path-not-found on hardcoded Windows path"
+    }
+  ],
+  "final_status": {
+    "source_code_modified": false,
+    "report_generated": true,
+    "benchmark_reliability": "not production-grade until Critical and High issues are fixed"
+  }
+}

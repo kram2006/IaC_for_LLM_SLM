@@ -26,7 +26,11 @@ def download_file(url, dest):
 def _is_within_directory(base_dir, target_path):
     base = Path(base_dir).resolve()
     target = Path(target_path).resolve()
-    return str(target).startswith(str(base))
+    try:
+        target.relative_to(base)
+        return True
+    except ValueError:
+        return False
 
 def safe_extract_tar(tar, path):
     for member in tar.getmembers():

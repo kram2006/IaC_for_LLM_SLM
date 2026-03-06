@@ -234,6 +234,8 @@ def compute_weighted_bleu(cd_tokens, ref_tokens, keywords, keyword_weight = 5):
     c, r = len(cd_tokens), len(ref_tokens)
     if c == 0:
         return 0.0
+    if r == 0:
+        return p1
     bp = 1 if c > r else math.exp(1-r/c)
 
     weighted_bleu = bp * p1 

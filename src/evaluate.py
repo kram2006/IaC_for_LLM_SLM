@@ -239,6 +239,12 @@ async def main():
     dataset_lock_dir = os.path.join(args.output_dir, "dataset", model_config.get("folder_name", model_name))
     os.makedirs(dataset_lock_dir, exist_ok=True)
     lockfile_path = os.path.join(dataset_lock_dir, ".evaluation_in_progress")
+    if os.path.exists(lockfile_path):
+        print(
+            f"{RED}ERROR: Evaluation already in progress for this model output folder "
+            f"({lockfile_path}). Remove the lockfile if no evaluation is running.{RESET}"
+        )
+        return
 
     try:
         with open(lockfile_path, "w", encoding="utf-8") as lock_file:

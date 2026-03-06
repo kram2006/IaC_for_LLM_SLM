@@ -20,8 +20,8 @@ import warnings
 warnings.filterwarnings("ignore")
 
 # ── Config ──────────────────────────────────────────────────────────────────────
-COMPARISON_JSON = r"c:\Users\kalar\Downloads\llm_eval_RK\iac-eval-main\comparison\comparison_dataset.json"
-OUTPUT_DIR = r"c:\Users\kalar\Downloads\llm_eval_RK\iac-eval-main\comparison"
+COMPARISON_JSON = os.environ.get("COMPARISON_JSON", "comparison/comparison_dataset.json")
+OUTPUT_DIR = os.environ.get("OUTPUT_DIR", "comparison")
 
 CANDIDATE_KEY = "code_Qwen_14B_Ollama"
 REFERENCE_KEYS = ["ref_DeepSeek_v3.2", "ref_Gemini_3_Pro", "ref_GPT_5.2_Codex"]
@@ -39,6 +39,8 @@ ALL_MODEL_KEYS = {
 
 
 def load_comparison_data():
+    if not os.path.exists(COMPARISON_JSON):
+        raise FileNotFoundError(f"comparison dataset not found: {COMPARISON_JSON}")
     with open(COMPARISON_JSON, 'r', encoding='utf-8') as f:
         return json.load(f)
 

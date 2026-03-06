@@ -3,6 +3,7 @@ import sys
 import logging
 import argparse
 import hashlib
+import re
 import yaml
 import csv
 import asyncio
@@ -28,6 +29,7 @@ from models import GlobalConfig, ModelConfig
 
 MAX_CHAIN_SLUG_LENGTH = 50
 CHAIN_HASH_LENGTH = 16
+PLACEHOLDER_PATTERN = re.compile(r'^\$\{[^}]+\}$')
 
 def _validate_local_path(path_value, arg_name):
     normalized = os.path.normpath(path_value)
@@ -35,6 +37,9 @@ def _validate_local_path(path_value, arg_name):
     if ".." in path_parts:
         raise ValueError(f"Invalid {arg_name} path: parent directory traversal is not allowed.")
     return normalized
+
+def _is_unresolved_placeholder(value):
+    return isinstance(value, str) and bool(PLACEHOLDER_PATTERN.match(value.strip()))
 
 def load_config(config_path):
     import re
@@ -134,6 +139,11 @@ async def main():
             )
 
         api_key = model_config.get('api_key') or os.environ.get('OPENROUTER_API_KEY') or expanded_config.get('openrouter', {}).get('api_key')
+        if _is_unresolved_placeholder(api_key):
+            raise ValueError(
+                f"Unresolved API key placeholder for model '{model_name}': {api_key}. "
+                "Set the referenced environment variable before running evaluation."
+            )
         base_url = model_config.get('base_url') or expanded_config.get('openrouter', {}).get('base_url', "https://openrouter.ai/api/v1/chat/completions")
         return OpenRouterClient(
             api_key=api_key,
@@ -226,13 +236,28 @@ async def main():
         
         unload_ollama_model(model_config)
 
-    # Launch parallel samples
-    print(f"\n{BOLD}{CYAN}>>> Launching {num_passes} parallel samples...{RESET}")
-    sample_tasks = [run_sample(p) for p in range(pass_start, pass_start + num_passes)]
-    results = await asyncio.gather(*sample_tasks, return_exceptions=True)
-    exceptions = [result for result in results if isinstance(result, Exception)]
-    if exceptions:
-        raise exceptions[0]
+    dataset_lock_dir = os.path.join(args.output_dir, "dataset", model_config.get("folder_name", model_name))
+    os.makedirs(dataset_lock_dir, exist_ok=True)
+    lockfile_path = os.path.join(dataset_lock_dir, ".evaluation_in_progress")
+
+    try:
+        with open(lockfile_path, "w", encoding="utf-8") as lock_file:
+            lock_file.write(f"model={model_name}\n")
+
+        if not args.plan_only and num_passes > 1:
+            print(f"\n{BOLD}{CYAN}>>> Running {num_passes} samples sequentially for apply-mode isolation...{RESET}")
+            for p in range(pass_start, pass_start + num_passes):
+                await run_sample(p)
+        else:
+            print(f"\n{BOLD}{CYAN}>>> Launching {num_passes} parallel samples...{RESET}")
+            sample_tasks = [run_sample(p) for p in range(pass_start, pass_start + num_passes)]
+            results = await asyncio.gather(*sample_tasks, return_exceptions=True)
+            exceptions = [result for result in results if isinstance(result, Exception)]
+            if exceptions:
+                raise exceptions[0]
+    finally:
+        if os.path.exists(lockfile_path):
+            os.remove(lockfile_path)
 
     print(f"\n{BOLD}{GREEN}Evaluation Complete. All files saved to: {os.path.abspath(args.output_dir)}{RESET}")
 

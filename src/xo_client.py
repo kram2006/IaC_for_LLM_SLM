@@ -58,12 +58,13 @@ class XenOrchestraClient:
             logging.error(f"XO WebSocket communication error: {str(e)}")
             return None
 
-    async def verify_vms(self, expected_count=None):
+    async def verify_vms(self, expected_count=None, force_refresh=False):
         """Asynchronous VM verification with TTL caching"""
         try:
             async with self._lock:
                 now = time.time()
-                if self._objects_cache is None or (now - self._cache_timestamp) > self._cache_ttl:
+                cache_expired = (now - self._cache_timestamp) > self._cache_ttl
+                if force_refresh or self._objects_cache is None or cache_expired:
                     vms = await self._call("xo.getAllObjects")
                     if vms:
                         self._objects_cache, self._cache_timestamp = vms, now

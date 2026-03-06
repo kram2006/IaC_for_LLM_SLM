@@ -51,7 +51,8 @@ async def evaluate_task(task, config, client, output_dir, workspace_override=Non
         os.makedirs(workspace_dir, exist_ok=True)
 
     # 3. Task Log Directory (Artifacts - Always unique to the current task)
-    task_artifact_dir = os.path.join(output_dir, "terraform_code", folder_name, task_id)
+    sample_suffix = f"sample_{sample_num}" if sample_num else "sample_0"
+    task_artifact_dir = os.path.join(output_dir, "terraform_code", folder_name, task_id, sample_suffix)
     os.makedirs(task_artifact_dir, exist_ok=True)
     task_log_dir = os.path.join(task_artifact_dir, "history") 
     os.makedirs(task_log_dir, exist_ok=True)
@@ -320,8 +321,8 @@ provider "xenorchestra" {{
                 continue
 
         if plan_only:
-            spec_passed = True if spec_res.get('status') == 'skipped' else spec_res.get('passed', False)
-            success = plan_res['exit_code'] == 0 and spec_passed is not False
+            spec_passed = spec_res.get('passed') is True
+            success = plan_res['exit_code'] == 0 and spec_passed
             apply_res = {"status": "skipped_plan_only", "exit_code": 0 if success else -1, "stderr": "Skipped (plan-only)", "stdout": "", "execution_time_seconds": 0}
             execution_results = {'outcome': 'success' if success else 'failure', 'iterations': iteration}
             break
@@ -339,7 +340,7 @@ provider "xenorchestra" {{
         break
 
     if not plan_only:
-        post_verification = await xo_client.verify_vms()
+        post_verification = await xo_client.verify_vms(force_refresh=True)
     else:
         post_verification = {"actual_vm_count": 0, "vm_details": [], "note": "Skipped (plan-only mode)"}
     

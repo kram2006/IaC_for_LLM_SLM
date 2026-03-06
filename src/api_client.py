@@ -3,8 +3,11 @@ import time
 import requests
 import json
 import logging
+import re
 from huggingface_hub import InferenceClient
 from eval_utils import extract_terraform_code
+
+PLACEHOLDER_PATTERN = re.compile(r'^\$\{[^}]+\}$')
 
 class OpenRouterClient:
     def __init__(self, api_key=None, model_name=None, temperature=0.2, max_tokens=4096, base_url="https://openrouter.ai/api/v1/chat/completions", timeout=300, seed=None):
@@ -15,6 +18,11 @@ class OpenRouterClient:
             
         if not self.api_key:
             raise ValueError("API Key (OPENROUTER_API_KEY or HF_TOKEN) not found")
+        if isinstance(self.api_key, str) and PLACEHOLDER_PATTERN.match(self.api_key.strip()):
+            raise ValueError(
+                f"Unresolved API key placeholder provided: {self.api_key}. "
+                "Set the referenced environment variable before creating the client."
+            )
             
         self.model_name = model_name
         if not self.model_name:

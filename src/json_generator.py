@@ -45,7 +45,7 @@ def check_compliance(actual, expected, default_min=None, expected_failure_matche
     """Checks if the actual value matches the expected value or a default minimum."""
     if expected_failure_matched:
         return True
-    if expected:
+    if expected is not None:
         return actual == expected
     if default_min:
         return actual is not None and actual >= default_min
@@ -98,6 +98,7 @@ def generate_dataset_entry(task_data, terraform_code, execution_results, verific
     plan_res = execution_results.get('terraform_plan', {})
     apply_res = execution_results.get('terraform_apply', {})
     final_success = apply_res.get('exit_code') == 0
+    spec_passed = execution_results.get('spec_accuracy', {}).get('passed') is True
     iterations = execution_results.get('iterations', 1)
 
     # Heuristic for Prompt Information Mapping
@@ -179,7 +180,11 @@ def generate_dataset_entry(task_data, terraform_code, execution_results, verific
             "available_ram_gb_before": round(config.get('xenorchestra', {}).get('usable_ram_gb', 20) - sum(vm.get('ram_gb', 0) for vm in pre_verification_data.get('vm_details', [])), 2),
             "available_ram_gb_after": round(config.get('xenorchestra', {}).get('usable_ram_gb', 20) - sum(vm.get('ram_gb', 0) for vm in verification_data.get('vm_details', [])), 2),
             "edge_case": "over_provisioning" if reqs.get('expected_error') == 'resource_exhaustion' else "none",
-            "system_prompt": redact_sensitive_text(model_config.get('system_prompt', config.get('system_prompt', '')))
+            "system_prompt": redact_sensitive_text(
+                model_config.get('system_prompt')
+                or config.get('baseline_system_prompt')
+                or config.get('system_prompt', '')
+            )
         },
         
         "prompt": {
@@ -260,7 +265,7 @@ def generate_dataset_entry(task_data, terraform_code, execution_results, verific
             "total_fixes_needed": iterations - 1,
             "total_iterations": iterations,
             "execution_successful": final_success or execution_results.get('expected_failure_matched', False),
-            "meets_requirements": final_success or execution_results.get('expected_failure_matched', False),
+            "meets_requirements": execution_results.get('expected_failure_matched', False) or (final_success and spec_passed),
             "resource_allocation_correct": execution_results.get('spec_accuracy', {}).get('passed', True)
         },
         

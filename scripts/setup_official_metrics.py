@@ -4,9 +4,10 @@ import tarfile
 import zipfile
 import subprocess
 import sys
+from pathlib import Path
 
 # Official Metric Tool URLs
-METEOR_JAR_URL = "http://www.cs.cmu.edu/~alavie/METEOR/download/meteor-1.5.tar.gz"
+METEOR_JAR_URL = "https://www.cs.cmu.edu/~alavie/METEOR/download/meteor-1.5.tar.gz"
 # ROUGE 1.5.5 is often difficult to find officially, using a community-maintained stable version
 ROUGE_ZIP_URL = "https://github.com/summanlp/evaluation/raw/master/rouge/ROUGE-1.5.5.zip"
 # CodeBLEU from Microsoft CodeXGLUE
@@ -16,13 +17,30 @@ TOOLS_DIR = os.path.abspath("tools")
 
 def download_file(url, dest):
     print(f"Downloading {url}...")
-    response = requests.get(url, stream=True)
-    if response.status_code == 200:
-        with open(dest, 'wb') as f:
-            for chunk in response.iter_content(chunk_size=8192):
-                f.write(chunk)
-    else:
-        print(f"Failed to download {url}")
+    response = requests.get(url, stream=True, timeout=60)
+    response.raise_for_status()
+    with open(dest, 'wb') as f:
+        for chunk in response.iter_content(chunk_size=8192):
+            f.write(chunk)
+
+def _is_within_directory(base_dir, target_path):
+    base = Path(base_dir).resolve()
+    target = Path(target_path).resolve()
+    return str(target).startswith(str(base))
+
+def safe_extract_tar(tar, path):
+    for member in tar.getmembers():
+        target_path = os.path.join(path, member.name)
+        if not _is_within_directory(path, target_path):
+            raise ValueError(f"Blocked unsafe tar path: {member.name}")
+    tar.extractall(path=path)
+
+def safe_extract_zip(zip_ref, path):
+    for member in zip_ref.namelist():
+        target_path = os.path.join(path, member)
+        if not _is_within_directory(path, target_path):
+            raise ValueError(f"Blocked unsafe zip path: {member}")
+    zip_ref.extractall(path)
 
 def setup_meteor():
     print("\n--- Setting up METEOR ---")
@@ -32,7 +50,7 @@ def setup_meteor():
     if os.path.exists(dest_tar):
         print("Extracting METEOR...")
         with tarfile.open(dest_tar, "r:gz") as tar:
-            tar.extractall(path=TOOLS_DIR)
+            safe_extract_tar(tar, TOOLS_DIR)
         print("METEOR setup complete.")
 
 def setup_rouge():
@@ -43,7 +61,7 @@ def setup_rouge():
     if os.path.exists(dest_zip):
         print("Extracting ROUGE...")
         with zipfile.ZipFile(dest_zip, 'r') as zip_ref:
-            zip_ref.extractall(TOOLS_DIR)
+            safe_extract_zip(zip_ref, TOOLS_DIR)
         print("ROUGE setup complete.")
 
 def setup_codebleu():

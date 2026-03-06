@@ -10,15 +10,28 @@ import json
 import os
 import glob
 from pathlib import Path
+import argparse
 
-BASE_DIR = Path(r"c:\Users\kalar\Downloads\llm_eval_RK\iac-eval-main")
-PHI4_RESULTS_DIR = BASE_DIR / "results" / "dataset" / "Phi4_14B_Ollama_Results"
-COMPARISON_JSON = BASE_DIR / "comparison" / "comparison_dataset.json"
 PREFIX = "code_Phi4_14B_Ollama"
 
 def main():
+    parser = argparse.ArgumentParser(description="Inject Phi-4 results into comparison dataset.")
+    parser.add_argument("--base-dir", default=".", help="Project root directory")
+    parser.add_argument("--results-dir", default="results/dataset/Phi4_14B_Ollama_Results", help="Phi-4 result JSON directory")
+    parser.add_argument("--comparison-json", default="comparison/comparison_dataset.json", help="Target comparison dataset JSON")
+    args = parser.parse_args()
+
+    base_dir = Path(args.base_dir)
+    phi4_results_dir = (base_dir / args.results_dir).resolve()
+    comparison_json = (base_dir / args.comparison_json).resolve()
+
+    if not comparison_json.exists():
+        raise FileNotFoundError(f"comparison dataset not found: {comparison_json}")
+    if not phi4_results_dir.exists():
+        raise FileNotFoundError(f"results directory not found: {phi4_results_dir}")
+
     # Load existing comparison dataset
-    with open(COMPARISON_JSON, 'r', encoding='utf-8') as f:
+    with open(comparison_json, 'r', encoding='utf-8') as f:
         dataset = json.load(f)
 
     # Build task_id -> index map
@@ -27,7 +40,7 @@ def main():
         task_map[row["task_id"]] = i
 
     # Find all Phi-4 result JSONs
-    phi4_files = sorted(glob.glob(str(PHI4_RESULTS_DIR / "*.json")))
+    phi4_files = sorted(glob.glob(str(phi4_results_dir / "*.json")))
     print(f"Found {len(phi4_files)} Phi-4 result files")
 
     # Track which task_ids we've seen (handle duplicates by picking the latest)
@@ -109,10 +122,10 @@ def main():
         injected_count += 1
 
     # Save updated dataset
-    with open(COMPARISON_JSON, 'w', encoding='utf-8') as f:
+    with open(comparison_json, 'w', encoding='utf-8') as f:
         json.dump(dataset, f, indent=2, ensure_ascii=False)
 
-    print(f"\n✅ Injected Phi-4 data for {injected_count}/{len(injected)} tasks into {COMPARISON_JSON}")
+    print(f"\n✅ Injected Phi-4 data for {injected_count}/{len(injected)} tasks into {comparison_json}")
     print(f"   Prefix: {PREFIX}")
 
 

@@ -15,13 +15,14 @@ Reads from the golden comparison_dataset.json and computes:
 import json, os, math, logging, warnings
 from pathlib import Path
 from collections import Counter
+import argparse
 
 warnings.filterwarnings("ignore")
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ── Paths ──────────────────────────────────────────────────────────────────
-BASE_DIR = Path(r"c:\Users\kalar\Downloads\llm_eval_RK\iac-eval-main")
+BASE_DIR = Path(os.environ.get("IAC_EVAL_BASE_DIR", "."))
 COMPARISON_JSON = BASE_DIR / "comparison" / "comparison_dataset.json"
 OUTPUT_DIR = BASE_DIR / "results" / "comparison_official"
 
@@ -56,6 +57,9 @@ def _tokenize(code):
 # Data Loading
 # ═══════════════════════════════════════════════════════════════════════════
 def load_data():
+    if not COMPARISON_JSON.exists():
+        print(f"[ERROR] comparison dataset not found: {COMPARISON_JSON}")
+        return []
     with open(COMPARISON_JSON, 'r', encoding='utf-8') as f:
         data = json.load(f)
     result = []
@@ -355,6 +359,22 @@ def compute_reference_functional(data):
 # MAIN
 # ═══════════════════════════════════════════════════════════════════════════
 def main():
+    parser = argparse.ArgumentParser(description="Evaluate Qwen vs Claude official comparison dataset.")
+    parser.add_argument("--base-dir", default=None, help="Project root directory")
+    parser.add_argument("--comparison-json", default=None, help="Path to comparison_dataset.json")
+    parser.add_argument("--output-dir", default=None, help="Directory for output reports")
+    args = parser.parse_args()
+
+    global COMPARISON_JSON, OUTPUT_DIR
+    if args.base_dir:
+        base_dir = Path(args.base_dir)
+        COMPARISON_JSON = base_dir / "comparison" / "comparison_dataset.json"
+        OUTPUT_DIR = base_dir / "results" / "comparison_official"
+    if args.comparison_json:
+        COMPARISON_JSON = Path(args.comparison_json)
+    if args.output_dir:
+        OUTPUT_DIR = Path(args.output_dir)
+
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     print("=" * 70)

@@ -18,6 +18,7 @@ Metrics:
 import json, os, math, warnings, csv
 from pathlib import Path
 from collections import Counter
+import argparse
 
 import nltk
 from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
@@ -27,7 +28,7 @@ from rouge_score import rouge_scorer
 warnings.filterwarnings("ignore")
 
 # -- Paths --
-BASE_DIR = Path(r"c:\Users\kalar\Downloads\llm_eval_RK\iac-eval-main")
+BASE_DIR = Path(os.environ.get("IAC_EVAL_BASE_DIR", "."))
 COMPARISON_JSON = BASE_DIR / "comparison" / "comparison_dataset.json"
 OUTPUT_DIR = BASE_DIR / "results" / "comparison_official" / "phi4_individual"
 
@@ -379,6 +380,25 @@ def run_pair(ref_model):
 
 # == MAIN ==
 def main():
+    parser = argparse.ArgumentParser(description="Evaluate Phi-4 against each reference model.")
+    parser.add_argument("--base-dir", default=None, help="Project root directory")
+    parser.add_argument("--comparison-json", default=None, help="Path to comparison_dataset.json")
+    parser.add_argument("--output-dir", default=None, help="Directory for generated reports")
+    args = parser.parse_args()
+
+    global COMPARISON_JSON, OUTPUT_DIR
+    if args.base_dir:
+        base_dir = Path(args.base_dir)
+        COMPARISON_JSON = base_dir / "comparison" / "comparison_dataset.json"
+        OUTPUT_DIR = base_dir / "results" / "comparison_official" / "phi4_individual"
+    if args.comparison_json:
+        COMPARISON_JSON = Path(args.comparison_json)
+    if args.output_dir:
+        OUTPUT_DIR = Path(args.output_dir)
+
+    if not COMPARISON_JSON.exists():
+        raise FileNotFoundError(f"comparison dataset not found: {COMPARISON_JSON}")
+
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     print("=" * 70)

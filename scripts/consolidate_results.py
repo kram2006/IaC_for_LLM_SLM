@@ -1,10 +1,9 @@
 import json
 import pandas as pd
 import os
+import argparse
 
-def consolidate_results():
-    results_path = r"c:\Users\kalar\Downloads\llm_eval_RK\iac-eval-main\results\comparison_official\qwen_vs_claude_python_official.json"
-    output_dir = r"c:\Users\kalar\Downloads\llm_eval_RK\iac-eval-main\results\comparison_official"
+def consolidate_results(results_path, output_dir):
     
     if not os.path.exists(results_path):
         print(f"Results not found at {results_path}")
@@ -29,4 +28,16 @@ def consolidate_results():
     print(f"✅ Consolidated CSV saved to {csv_path}")
 
 if __name__ == "__main__":
-    consolidate_results()
+    parser = argparse.ArgumentParser(description="Consolidate comparison results into leaderboard CSV.")
+    parser.add_argument(
+        "--results-path",
+        default="results/comparison_official/qwen_vs_claude_python_official.json",
+        help="Path to qwen_vs_claude_python_official.json"
+    )
+    parser.add_argument(
+        "--output-dir",
+        default="results/comparison_official",
+        help="Directory where performance_leaderboard_official.csv will be written"
+    )
+    args = parser.parse_args()
+    consolidate_results(args.results_path, args.output_dir)

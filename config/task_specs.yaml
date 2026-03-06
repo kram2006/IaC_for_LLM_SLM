@@ -1,0 +1,51 @@
+C1.1:
+  category: CREATE
+  min_vm_count: 1
+  max_vm_count: 1
+C1.2:
+  category: CREATE
+  vm_count: 1
+  per_vm_memory_max: 2147483648
+C1.3:
+  category: CREATE
+  vm_count: 1
+  per_vm_memory_max: 4294967296
+  per_vm_cpus: 2
+  vm_names:
+    - app-01
+  per_vm_disk_size: 53687091200
+C2.2:
+  category: CREATE
+  vm_count: 3
+  per_vm_memory_max: 2147483648
+C2.3:
+  category: CREATE
+  vm_count: 3
+  per_vm_memory_max: 4294967296
+  per_vm_cpus: 2
+  vm_names:
+    - web-01
+    - web-02
+    - web-03
+  per_vm_disk_size: 53687091200
+R1.2:
+  category: READ
+U1.2:
+  category: UPDATE
+  target_vm: app-01
+  updated_field: memory_max
+  new_value: 6442450944
+D1.2:
+  category: DELETE
+  target_vm: app-01
+  delete_count: 1
+D2.2:
+  category: DELETE
+  target_vms:
+    - web-02
+    - web-03
+  delete_count: 2
+C5.2:
+  category: CREATE
+  max_total_ram_gb: 20
+  max_total_cpus: 32

@@ -1,0 +1,11 @@
+{
+  "total_tasks_scored": 10,
+  "resource_type_counts": {
+    "xenorchestra_network": 8,
+    "xenorchestra_pool": 10,
+    "xenorchestra_sr": 8,
+    "xenorchestra_template": 8,
+    "xenorchestra_vm": 8,
+    "xenorchestra_vms": 1
+  }
+}

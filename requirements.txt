@@ -1,0 +1,12 @@
+requests>=2.28.0
+pyyaml>=6.0
+importlib-metadata>=6.0.0
+python-dotenv>=1.0.0
+websockets>=11.0.3
+pandas
+pytest
+nltk
+huggingface_hub
+docker
+pydantic
+aiohttp

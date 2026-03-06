@@ -1,0 +1,65 @@
+openrouter:
+  api_key: "${OPENROUTER_API_KEY}"
+  base_url: "https://openrouter.ai/api/v1/chat/completions"
+  timeout: 600
+  max_retries: 3
+
+xenorchestra:
+  url: "ws://localhost:8080/api/"
+  username: "admin@admin.net"
+  password: "admin"
+  total_ram_gb: 24
+  total_cpu_cores: 32
+  usable_ram_gb: 20
+  # ── Platform constants used by prompt templates and spec_checker ────────────
+  # Change these if your XO environment uses different names.
+  pool_name: "DAO-Agentic-Infra"
+  network_name: "Pool-wide network associated with eth0"
+  sr_name: "Local storage"
+  template_name: "Ubuntu-22"
+
+# =============================================================================
+# BASELINE SYSTEM PROMPT (Research-Based Template for IaC Generation)
+# Used as fallback for models without custom prompts
+# =============================================================================
+baseline_system_prompt: |
+  You are TerraformAI, an AI agent that builds and deploys Cloud Infrastructure written in Terraform HCL for Xen Orchestra. Generate a description of the Terraform program you will define, followed by a single Terraform HCL program in response to each of my Instructions. Make sure the configuration is deployable. If variables are used, make sure default values are supplied. Be sure to include a valid provider configuration. Make sure there are no undeclared resources (e.g., as references) or variables, that is, all resources and variables needed in the configuration should be fully specified.
+
+  When writing the Terraform code, you must use the following Xen Orchestra environment details:
+  - Provider: url="ws://localhost:8080", username="admin@admin.net", password="admin", insecure=true.
+  - Data sources: Use name_label "DAO-Agentic-Infra" for the pool, "Pool-wide network associated with eth0" for the network, "Local storage" for the storage repository (sr), and "Ubuntu-22" for the OS template.
+  - All VMs must use the IDs resolved from these data sources. VM memory must be specified in raw bytes as an integer.
+
+multi_turn_system_prompt: |
+  You are TerraformAI, an AI agent that builds and deploys Cloud Infrastructure written in Terraform HCL for Xen Orchestra. Given an incorrect Terraform program along with an error message, your task is to first describe the error in your own words, followed by a description of the fix you will apply, and ending with a single corrected Terraform HCL program. Make sure the configuration is deployable. If variables are used, make sure default values are supplied.
+
+  When writing the Terraform code, you must use the following Xen Orchestra environment details:
+  - Provider: url="ws://localhost:8080", username="admin@admin.net", password="admin", insecure=true.
+  - Data sources: Use name_label "DAO-Agentic-Infra" for the pool, "Pool-wide network associated with eth0" for the network, "Local storage" for the storage repository (sr), and "Ubuntu-22" for the OS template.
+  - All VMs must use the IDs resolved from these data sources. VM memory must be specified in raw bytes as an integer.
+
+# =============================================================================
+# MODEL-SPECIFIC CONFIGURATIONS
+# =============================================================================
+
+models:
+  phi4_ollama:
+    name: "phi4:14B"
+    display_name: "Phi-4 (Ollama)"
+    folder_name: "Phi4_Ollama_Results"
+    id_prefix: "Phi4_Ol"
+    temperature: 0.2
+    max_tokens: 16384
+    seed: 42
+    base_url: "http://localhost:11434/v1/chat/completions"
+    api_key: "none"
+
+  phi4_openrouter:
+    name: "microsoft/phi-4"
+    display_name: "Phi-4 (OpenRouter)"
+    folder_name: "phi4_or"
+    id_prefix: "phi4or"
+    temperature: 0.2
+    max_tokens: 4096
+    base_url: "https://openrouter.ai/api/v1/chat/completions"
+    api_key: "${OPENROUTER_API_KEY}"

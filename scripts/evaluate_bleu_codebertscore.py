@@ -19,10 +19,20 @@ import os
 load_dotenv()
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 
-import nltk
-from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
-from nltk.translate.meteor_score import meteor_score
-from rouge_score import rouge_scorer
+try:
+    import nltk
+    from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
+    from nltk.translate.meteor_score import meteor_score
+except ImportError:  # pragma: no cover - optional dependency
+    nltk = None
+    sentence_bleu = None
+    SmoothingFunction = None
+    meteor_score = None
+
+try:
+    from rouge_score import rouge_scorer
+except ImportError:  # pragma: no cover - optional dependency
+    rouge_scorer = None
 try:
     from code_bert_score import score as code_bert_score
 except Exception:  # pragma: no cover - optional dependency
@@ -327,6 +337,11 @@ def calculate_codebleu(candidate, reference, weights = (0.25, 0.25, 0.25, 0.25))
 # Computing text metrics: BLEU, ROUGE, METEOR, CodeBERTScore, CodeBLEU.
 def compute_text_metrics(reference: str, candidate: str) -> Dict[str, float]:
     """Compute BLEU, ROUGE-3 (F1), METEOR, CodeBERTScore, and CodeBLEU for a single example."""
+    if sentence_bleu is None or SmoothingFunction is None or meteor_score is None:
+        raise ImportError("nltk is required for BLEU/METEOR metrics. Install with: pip install nltk")
+    if rouge_scorer is None:
+        raise ImportError("rouge-score is required for ROUGE metrics. Install with: pip install rouge-score")
+
     reference = reference or ""
     candidate = candidate or ""
 
@@ -369,6 +384,8 @@ def compute_text_metrics(reference: str, candidate: str) -> Dict[str, float]:
 
 def ensure_nltk_resources():
     """Ensure required NLTK resources for METEOR are available."""
+    if nltk is None:
+        raise ImportError("nltk is required to download and use METEOR resources.")
     for resource in ["wordnet", "omw-1.4"]:
         try:
             nltk.data.find(f"corpora/{resource}")

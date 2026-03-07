@@ -36,6 +36,23 @@ export XO_PASSWORD="your-xo-password"
 python src/evaluate.py --model phi4_openrouter --task_id C1.1 --plan-only
 ```
 
+### Hugging Face Provider Notes
+
+If you run models through a Hugging Face Inference endpoint (`base_url` contains `huggingface.co`), make sure:
+
+```bash
+# Required auth for Hugging Face inference path
+export HF_TOKEN="hf_..."
+
+# Required optional dependency for InferenceClient
+pip install huggingface_hub
+```
+
+Common failure modes:
+- `API Key ... not found` → set `HF_TOKEN` (or explicit API key in config).
+- `huggingface_hub is not installed` → install `huggingface_hub`.
+- `Hugging Face Inference failed: ...` → verify model id/access and endpoint availability.
+
 ### Parallel Pass@5 Sampling
 Evaluate a task 5 times in parallel to calculate Pass@5:
 ```bash

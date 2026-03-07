@@ -53,13 +53,31 @@ def check_compliance(actual, expected, default_min=None, expected_failure_matche
 
 def _normalize_expected_resources(reqs, vm_count):
     vm_count = vm_count or 1
+    legacy_memory = reqs.get('memory_max_bytes')
+    legacy_cpus = reqs.get('cpus')
+    legacy_size = reqs.get('size_bytes')
+    if vm_count > 1:
+        total_memory = reqs.get('total_memory_max_bytes', legacy_memory)
+        total_cpus = reqs.get('total_cpus', legacy_cpus)
+        total_size = reqs.get('total_size_bytes', legacy_size)
+        per_vm_memory = reqs.get('per_vm_memory_max_bytes')
+        per_vm_cpus = reqs.get('per_vm_cpus')
+        per_vm_size = reqs.get('per_vm_size_bytes')
+    else:
+        total_memory = reqs.get('total_memory_max_bytes')
+        total_cpus = reqs.get('total_cpus')
+        total_size = reqs.get('total_size_bytes')
+        per_vm_memory = reqs.get('per_vm_memory_max_bytes', legacy_memory)
+        per_vm_cpus = reqs.get('per_vm_cpus', legacy_cpus)
+        per_vm_size = reqs.get('per_vm_size_bytes', legacy_size)
+
     normalized = {
-        "per_vm_memory_max_bytes": reqs.get('per_vm_memory_max_bytes', reqs.get('memory_max_bytes')),
-        "per_vm_cpus": reqs.get('per_vm_cpus', reqs.get('cpus')),
-        "per_vm_size_bytes": reqs.get('per_vm_size_bytes', reqs.get('size_bytes')),
-        "total_memory_max_bytes": reqs.get('total_memory_max_bytes'),
-        "total_cpus": reqs.get('total_cpus'),
-        "total_size_bytes": reqs.get('total_size_bytes'),
+        "per_vm_memory_max_bytes": per_vm_memory,
+        "per_vm_cpus": per_vm_cpus,
+        "per_vm_size_bytes": per_vm_size,
+        "total_memory_max_bytes": total_memory,
+        "total_cpus": total_cpus,
+        "total_size_bytes": total_size,
     }
     if normalized["per_vm_memory_max_bytes"] is None and normalized["total_memory_max_bytes"] is not None:
         normalized["per_vm_memory_max_bytes"] = round(normalized["total_memory_max_bytes"] / vm_count)
@@ -115,9 +133,18 @@ def generate_dataset_entry(task_data, terraform_code, execution_results, verific
     val_res = execution_results.get('terraform_validate', {})
     plan_res = execution_results.get('terraform_plan', {})
     apply_res = execution_results.get('terraform_apply', {})
-    final_success = apply_res.get('exit_code') == 0
     spec_passed = execution_results.get('spec_accuracy', {}).get('passed') is True
     iterations = execution_results.get('iterations', 1)
+    apply_status = apply_res.get('status')
+    terraform_plan_success = plan_res.get('exit_code') == 0
+    terraform_apply_success = apply_status == "success" and apply_res.get('exit_code') == 0
+    plan_success = terraform_plan_success
+    apply_success = terraform_apply_success
+    expected_failure_matched = execution_results.get('expected_failure_matched', False)
+    post_state_result = execution_results.get('post_state_verification') or {"status": "not_applicable"}
+    post_state_required = post_state_result.get('passed') is not None
+    post_state_passed = (post_state_result.get('passed') is True) if post_state_required else True
+    execution_successful = expected_failure_matched or (plan_success if apply_status == "skipped_plan_only" else apply_success)
 
     # Heuristic for Prompt Information Mapping
     prompt_text = task_data.get('prompt', '')
@@ -153,9 +180,6 @@ def generate_dataset_entry(task_data, terraform_code, execution_results, verific
     actual_memory = round(actual_total_memory / vm_count) if actual_total_memory is not None else None
     actual_cpus = round(actual_total_cpus / vm_count) if actual_total_cpus is not None else None
     actual_disk = round(actual_total_disk / vm_count) if actual_total_disk is not None else None
-
-    # Logic for "Meets Requirements"
-    expected_failure_matched = execution_results.get('expected_failure_matched', False)
 
     # Construct Final JSON
     entry = {
@@ -273,7 +297,7 @@ def generate_dataset_entry(task_data, terraform_code, execution_results, verific
             "details": execution_results.get('spec_accuracy', {}).get('details', {}),
         },
         
-        "post_state_verification": execution_results.get('post_state_verification') or {"status": "not_applicable"},
+        "post_state_verification": post_state_result,
         
         "manual_interventions": execution_results.get('manual_interventions', []),
         
@@ -282,8 +306,10 @@ def generate_dataset_entry(task_data, terraform_code, execution_results, verific
             "worked_after_fixes": iterations > 1,
             "total_fixes_needed": iterations - 1,
             "total_iterations": iterations,
-            "execution_successful": final_success or execution_results.get('expected_failure_matched', False),
-            "meets_requirements": execution_results.get('expected_failure_matched', False) or (final_success and spec_passed),
+            "plan_success": plan_success,
+            "apply_success": apply_success,
+            "execution_successful": execution_successful,
+            "meets_requirements": expected_failure_matched or (execution_successful and spec_passed and post_state_passed),
             "resource_allocation_correct": execution_results.get('spec_accuracy', {}).get('passed', True)
         },
         
@@ -302,8 +328,8 @@ def generate_dataset_entry(task_data, terraform_code, execution_results, verific
             "execution": {
                 "terraform_init_success": init_res.get('exit_code') == 0,
                 "terraform_validate_success": val_res.get('exit_code') == 0,
-                "terraform_plan_success": plan_res.get('exit_code') == 0,
-                "terraform_apply_success": apply_res.get('status') not in {'skipped', 'skipped_plan_only'} and final_success,
+                "terraform_plan_success": terraform_plan_success,
+                "terraform_apply_success": terraform_apply_success,
                 "vm_in_xen_orchestra": verification_data.get('vms_exist_in_xo', False),
                 "vm_running": verification_data.get('all_vms_running', False),
                 "vm_has_correct_ram": _check_vm_ram(actual_memory, verification_data, terraform_code),

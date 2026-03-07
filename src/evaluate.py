@@ -175,13 +175,18 @@ async def main():
         )
 
     # Load Tasks
-    tasks = []
+    dataset_tasks = []
     with open(args.dataset, 'r', newline='') as f:
         reader = csv.DictReader(f)
         for row in reader:
-            if args.task_id and row['task_id'].lower() != args.task_id.lower():
-                continue
-            tasks.append(row)
+            dataset_tasks.append(row)
+
+    tasks = dataset_tasks
+    if args.task_id:
+        if args.chain:
+            print(f"{RED}Error: --task_id cannot be used together with --chain.{RESET}")
+            return
+        tasks = [row for row in dataset_tasks if row['task_id'].lower() == args.task_id.lower()]
 
     if not tasks:
         print(f"{RED}No tasks found matching criteria.{RESET}")
@@ -189,9 +194,27 @@ async def main():
 
     # Filter for chain if requested
     if args.chain:
-        chain_ids = [tid.strip().lower() for tid in args.chain.split(',')]
-        tasks = [t for t in tasks if t['task_id'].lower() in chain_ids]
-        tasks.sort(key=lambda x: chain_ids.index(x['task_id'].lower()))
+        chain_ids = [tid.strip().lower() for tid in args.chain.split(',') if tid.strip()]
+        if not chain_ids:
+            print(f"{RED}Error: --chain must contain at least one task ID.{RESET}")
+            return
+
+        duplicates = sorted({tid for tid in chain_ids if chain_ids.count(tid) > 1})
+        if duplicates:
+            print(f"{RED}Error: Duplicate task IDs in --chain: {', '.join(duplicates)}{RESET}")
+            return
+
+        all_tasks_by_id = {row['task_id'].lower(): row for row in dataset_tasks}
+        missing = [tid for tid in chain_ids if tid not in all_tasks_by_id]
+        if missing:
+            available = ", ".join(sorted(all_tasks_by_id.keys()))
+            print(
+                f"{RED}Error: Unknown task IDs in --chain: {', '.join(missing)}. "
+                f"Available task IDs: {available}{RESET}"
+            )
+            return
+
+        tasks = [all_tasks_by_id[tid] for tid in chain_ids]
 
     # Pass@k Loop
     num_passes = args.samples
@@ -216,6 +239,8 @@ async def main():
         
         has_previous_run = None
         workspace_dir = None
+        base_folder_name = model_config.get('folder_name', model_name)
+        effective_folder_name = f"{base_folder_name}_{args.enhance_strat}" if args.enhance_strat else base_folder_name
         
         if args.chain:
             # Chained mode: Shared workspace for all tasks in this sample
@@ -223,7 +248,12 @@ async def main():
             chain_slug = "_".join(chain_ids)
             if len(chain_slug) > MAX_CHAIN_SLUG_LENGTH:
                 chain_slug = hashlib.sha256(chain_slug.encode("utf-8")).hexdigest()[:CHAIN_HASH_LENGTH]
-            workspace_dir = os.path.join(args.output_dir, "terraform_code", model_config['folder_name'], f"chain_{chain_slug}_p{pass_num}")
+            workspace_dir = os.path.join(
+                args.output_dir,
+                "terraform_code",
+                effective_folder_name,
+                f"chain_{chain_slug}_p{pass_num}"
+            )
             os.makedirs(workspace_dir, exist_ok=True)
             cleanup_workspaces.append(workspace_dir)
             
@@ -235,7 +265,7 @@ async def main():
                     task_workspace = os.path.join(
                         args.output_dir,
                         "terraform_code",
-                        model_config['folder_name'],
+                        effective_folder_name,
                         f"chain_{chain_slug}_read_{task_spec['task_id'].replace('.', '_')}_p{pass_num}"
                     )
                     os.makedirs(task_workspace, exist_ok=True)
@@ -258,7 +288,12 @@ async def main():
             # Standalone mode: Each task gets its own workspace path
             for task_spec in tasks:
                 tid = task_spec['task_id'].replace('.', '_')
-                sample_workspace = os.path.join(args.output_dir, "terraform_code", model_config['folder_name'], f"{tid}_p{pass_num}")
+                sample_workspace = os.path.join(
+                    args.output_dir,
+                    "terraform_code",
+                    effective_folder_name,
+                    f"{tid}_p{pass_num}"
+                )
                 os.makedirs(sample_workspace, exist_ok=True)
                 cleanup_workspaces.append(sample_workspace)
                 

@@ -72,6 +72,7 @@ async def evaluate_task(task, config, client, output_dir, workspace_override=Non
     url = xo_cfg.get('url', 'ws://localhost:8080/api/')
     url = url.removesuffix('/api/').removesuffix('/api')
     system_prompt = system_prompt.replace("{XO_URL}", url)
+    system_prompt = system_prompt.replace("${XO_URL}", url)
     
     # Pre-compute TF_VARs for terraform subprocesses
     tf_env = {
@@ -149,8 +150,8 @@ async def evaluate_task(task, config, client, output_dir, workspace_override=Non
     xo_conf = config.get('xenorchestra', {})
     xo_client = XenOrchestraClient(
         xo_conf.get('url', "ws://localhost:8080/api/"), 
-        xo_conf.get('username', "admin@admin.net"), 
-        xo_conf.get('password', "admin")
+        xo_conf.get('username', os.environ.get("XO_USERNAME", "")), 
+        xo_conf.get('password', os.environ.get("XO_PASSWORD", ""))
     )
     if plan_only:
         pre_verification = {"actual_vm_count": 0, "vm_details": [], "note": "Skipped (plan-only mode)"}

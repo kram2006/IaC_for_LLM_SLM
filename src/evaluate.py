@@ -22,7 +22,7 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from api_client import OpenRouterClient, LocalTransformersClient
 from logger import setup_logger, log_step, log_error
 from eval_utils import (
-    unload_ollama_model, GREEN, RED, CYAN, YELLOW, BOLD, RESET
+    unload_ollama_model, execute_command, GREEN, RED, CYAN, YELLOW, BOLD, RESET
 )
 from eval_core import evaluate_task
 from models import GlobalConfig, ModelConfig
@@ -30,6 +30,8 @@ from models import GlobalConfig, ModelConfig
 MAX_CHAIN_SLUG_LENGTH = 50
 CHAIN_HASH_LENGTH = 16
 PLACEHOLDER_PATTERN = re.compile(r'^\$\{[^}]+\}$')
+DEFAULT_OPENROUTER_TIMEOUT = 300
+DEFAULT_OPENROUTER_MAX_RETRIES = 3
 
 def _validate_local_path(path_value, arg_name):
     normalized = os.path.normpath(path_value)
@@ -40,6 +42,13 @@ def _validate_local_path(path_value, arg_name):
 
 def _is_unresolved_placeholder(value):
     return isinstance(value, str) and bool(PLACEHOLDER_PATTERN.match(value.strip()))
+
+def _normalize_positive_int(value, fallback):
+    try:
+        parsed = int(value)
+        return parsed if parsed > 0 else fallback
+    except (TypeError, ValueError):
+        return fallback
 
 def load_config(config_path):
     import re
@@ -145,13 +154,23 @@ async def main():
                 "Set the referenced environment variable before running evaluation."
             )
         base_url = model_config.get('base_url') or expanded_config.get('openrouter', {}).get('base_url', "https://openrouter.ai/api/v1/chat/completions")
+        openrouter_cfg = expanded_config.get('openrouter', {})
+        timeout = _normalize_positive_int(
+            model_config.get('timeout', openrouter_cfg.get('timeout', DEFAULT_OPENROUTER_TIMEOUT)),
+            DEFAULT_OPENROUTER_TIMEOUT
+        )
+        max_retries = _normalize_positive_int(
+            model_config.get('max_retries', openrouter_cfg.get('max_retries', DEFAULT_OPENROUTER_MAX_RETRIES)),
+            DEFAULT_OPENROUTER_MAX_RETRIES
+        )
         return OpenRouterClient(
             api_key=api_key,
             model_name=model_config['name'],
             temperature=model_config.get('temperature', 0.2),
             max_tokens=model_config.get('max_tokens', 4096),
             base_url=base_url,
-            timeout=300,
+            timeout=timeout,
+            max_retries=max_retries,
             seed=sample_seed
         )
 
@@ -188,6 +207,12 @@ async def main():
         sample_seed = (base_seed + pass_idx) if base_seed is not None else None
         client = create_client(sample_seed)
         log_step(f"Starting Pass {pass_num}")
+        cleanup_workspaces = []
+        xo_cfg = expanded_config.get('xenorchestra', {})
+        tf_env = {
+            'TF_VAR_xo_username': xo_cfg.get('username') or os.environ.get('XO_USERNAME', ''),
+            'TF_VAR_xo_password': xo_cfg.get('password') or os.environ.get('XO_PASSWORD', '')
+        }
         
         has_previous_run = None
         workspace_dir = None
@@ -200,16 +225,30 @@ async def main():
                 chain_slug = hashlib.sha256(chain_slug.encode("utf-8")).hexdigest()[:CHAIN_HASH_LENGTH]
             workspace_dir = os.path.join(args.output_dir, "terraform_code", model_config['folder_name'], f"chain_{chain_slug}_p{pass_num}")
             os.makedirs(workspace_dir, exist_ok=True)
+            cleanup_workspaces.append(workspace_dir)
             
             for i, task_spec in enumerate(tasks):
+                task_category = task_spec.get('category', '').strip().upper()
+                task_plan_only = args.plan_only or (task_category == 'READ')
+                task_workspace = workspace_dir
+                if task_category == 'READ':
+                    task_workspace = os.path.join(
+                        args.output_dir,
+                        "terraform_code",
+                        model_config['folder_name'],
+                        f"chain_{chain_slug}_read_{task_spec['task_id'].replace('.', '_')}_p{pass_num}"
+                    )
+                    os.makedirs(task_workspace, exist_ok=True)
+                    cleanup_workspaces.append(task_workspace)
+
                 has_previous_run = await evaluate_task(
                     task=task_spec,
                     config=expanded_config,
                     client=client,
                     output_dir=args.output_dir,
-                    workspace_override=workspace_dir,
+                    workspace_override=task_workspace,
                     initial_history=has_previous_run,
-                    plan_only=args.plan_only,
+                    plan_only=task_plan_only,
                     sample_num=pass_num,
                     chain_index=i,
                     no_confirm=args.no_confirm,
@@ -221,6 +260,7 @@ async def main():
                 tid = task_spec['task_id'].replace('.', '_')
                 sample_workspace = os.path.join(args.output_dir, "terraform_code", model_config['folder_name'], f"{tid}_p{pass_num}")
                 os.makedirs(sample_workspace, exist_ok=True)
+                cleanup_workspaces.append(sample_workspace)
                 
                 await evaluate_task(
                     task=task_spec,
@@ -233,6 +273,21 @@ async def main():
                     no_confirm=args.no_confirm,
                     enhance_strat=args.enhance_strat
                 )
+
+        should_cleanup = not args.plan_only and args.samples > 1
+        if should_cleanup:
+            for cleanup_workspace in cleanup_workspaces:
+                tfstate_path = os.path.join(cleanup_workspace, "terraform.tfstate")
+                if not os.path.exists(tfstate_path):
+                    continue
+                destroy_res = await execute_command(
+                    "terraform destroy -auto-approve -no-color",
+                    cwd=cleanup_workspace,
+                    timeout=300,
+                    env=tf_env
+                )
+                if destroy_res.get('exit_code') != 0:
+                    log_error(f"Post-sample cleanup failed for {cleanup_workspace}: {destroy_res.get('stderr', '')}")
         
         unload_ollama_model(model_config)
 

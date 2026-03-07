@@ -4,24 +4,32 @@ import tarfile
 import zipfile
 import subprocess
 import sys
+import hashlib
 from pathlib import Path
 
 # Official Metric Tool URLs
 METEOR_JAR_URL = "https://www.cs.cmu.edu/~alavie/METEOR/download/meteor-1.5.tar.gz"
-# ROUGE 1.5.5 is often difficult to find officially, using a community-maintained stable version
-ROUGE_ZIP_URL = "https://github.com/summanlp/evaluation/raw/master/rouge/ROUGE-1.5.5.zip"
+# Pinned source archive for pyrouge (contains ROUGE-1.5.5 scripts under tools/)
+ROUGE_ZIP_URL = "https://codeload.github.com/andersjo/pyrouge/zip/3b6c415204dbc2c8360a01d92533441f4aae95eb"
+ROUGE_ZIP_SHA256 = "be8639eba36d171e5d2b1eb865fc01b406022c98fbe32c4304ddd869e6018463"
 # CodeBLEU from Microsoft CodeXGLUE
 CODEBLEU_REPO = "https://github.com/microsoft/CodeXGLUE.git"
 
 TOOLS_DIR = os.path.abspath("tools")
 
-def download_file(url, dest):
+def download_file(url, dest, expected_sha256=None):
     print(f"Downloading {url}...")
     response = requests.get(url, stream=True, timeout=60)
     response.raise_for_status()
+    digest = hashlib.sha256()
     with open(dest, 'wb') as f:
         for chunk in response.iter_content(chunk_size=8192):
             f.write(chunk)
+            digest.update(chunk)
+    if expected_sha256:
+        actual = digest.hexdigest()
+        if actual.lower() != expected_sha256.lower():
+            raise ValueError(f"Checksum mismatch for {dest}. Expected {expected_sha256}, got {actual}")
 
 def _is_within_directory(base_dir, target_path):
     base = Path(base_dir).resolve()
@@ -59,8 +67,8 @@ def setup_meteor():
 
 def setup_rouge():
     print("\n--- Setting up ROUGE ---")
-    dest_zip = os.path.join(TOOLS_DIR, "ROUGE-1.5.5.zip")
-    download_file(ROUGE_ZIP_URL, dest_zip)
+    dest_zip = os.path.join(TOOLS_DIR, "pyrouge-ROUGE-1.5.5.zip")
+    download_file(ROUGE_ZIP_URL, dest_zip, expected_sha256=ROUGE_ZIP_SHA256)
     
     if os.path.exists(dest_zip):
         print("Extracting ROUGE...")

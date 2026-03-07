@@ -4,6 +4,8 @@ import tempfile
 import subprocess
 import csv
 import re
+import asyncio
+import shlex
 
 import pytest
 
@@ -13,6 +15,7 @@ if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
 
 from eval_utils import extract_terraform_code
+from eval_utils import execute_command
 from eval_utils import redact_sensitive_text as redact_eval_sensitive_text, redact_messages_for_logging
 from spec_checker import DeleteValidation
 from spec_checker import CreateValidation, ReadValidation, UpdateValidation
@@ -20,6 +23,7 @@ from compute_metrics import compute_metrics_for_folder, calculate_pass_at_k
 from evaluate import _validate_local_path, load_config
 from spec_checker import get_plan_json, _extract_vm_resources
 from json_generator import redact_sensitive_text as redact_json_sensitive_text, check_compliance
+from json_generator import generate_dataset_entry
 from llm_judge import parse_verdict
 from populate_references import populate
 from complexity_scorer import score_dataset
@@ -27,6 +31,18 @@ from complexity_scorer import score_dataset
 
 def test_extract_terraform_code_keeps_non_empty_when_language_line_has_no_newline():
     assert extract_terraform_code("```hcl```") == "hcl"
+
+
+def test_execute_command_timeout_returns_timeout_status():
+    result = asyncio.run(
+        execute_command(
+            f"{shlex.quote(sys.executable)} -c \"import time; time.sleep(0.2)\"",
+            timeout=0.01,
+            print_output=False
+        )
+    )
+    assert result["status"] == "timeout"
+    assert result["exit_code"] == -1
 
 
 def test_extract_terraform_code_parses_hcl_block_with_language_tag():
@@ -254,9 +270,65 @@ def test_update_validation_rejects_create_delete_replace():
     assert details.get("had_replace_actions") is True
 
 
+def test_update_validation_handles_zero_new_value():
+    validator = UpdateValidation()
+    vm_resources = [{"action": "update", "cpus": 0}]
+    specs = {"updated_field": "cpus", "new_value": 0}
+    errors, checks, _ = validator.validate(vm_resources, specs)
+    assert errors == []
+    assert "cpus_update" in checks
+
+
 def test_read_validation_detects_non_vm_resource_changes():
     validator = ReadValidation()
     changes = [{"action": "update", "address": "xenorchestra_network.main"}]
     errors, checks, _ = validator.validate(changes, {})
     assert "no_resource_changes" in checks
     assert any("must not modify infrastructure" in e for e in errors)
+
+
+def test_delete_validation_enforces_zero_delete_count():
+    validator = DeleteValidation()
+    vm_resources = [{"action": "delete", "name_label": "unexpected-vm"}]
+    specs = {"delete_count": 0}
+    errors, _, _ = validator.validate(vm_resources, specs)
+    assert any("Expected 0 deletions" in e for e in errors)
+
+
+def test_generate_dataset_entry_marks_plan_only_apply_as_skipped():
+    task = {
+        "task_id": "C2.3",
+        "category": "CREATE",
+        "prompt_type": "detailed",
+        "prompt": "Create two VMs",
+        "resource_requirements": '{"count": 2, "total_memory_max_bytes": 8589934592, "total_cpus": 4, "total_size_bytes": 21474836480}'
+    }
+    execution_results = {
+        "terraform_init": {"exit_code": 0, "execution_time_seconds": 0, "stderr": ""},
+        "terraform_validate": {"exit_code": 0, "execution_time_seconds": 0, "stderr": ""},
+        "terraform_plan": {"exit_code": 0, "execution_time_seconds": 0, "stdout": "Plan: 2 to add", "stderr": ""},
+        "terraform_apply": {"status": "skipped_plan_only", "exit_code": 0, "execution_time_seconds": 0, "stderr": "Skipped (plan-only)"},
+        "spec_accuracy": {"status": "executed", "passed": True, "errors": [], "checks_performed": []},
+        "iterations": 1,
+        "generation_time": 0,
+        "sample_num": 1,
+        "raw_llm_response": "",
+        "enhance_strat": ""
+    }
+    config = {
+        "active_model_name": "m",
+        "models": {"m": {"id_prefix": "m", "display_name": "Model", "name": "model"}}
+    }
+    entry = generate_dataset_entry(
+        task_data=task,
+        terraform_code='resource "xenorchestra_vm" "a" { memory_max = 4294967296 cpus = 2 size = 10737418240 }\n'
+                       'resource "xenorchestra_vm" "b" { memory_max = 4294967296 cpus = 2 size = 10737418240 }',
+        execution_results=execution_results,
+        verification_data={},
+        pre_verification_data={},
+        config=config
+    )
+    assert entry["execution_results"]["terraform_apply"]["status"] == "skipped_plan_only"
+    assert entry["validation_checklist"]["execution"]["terraform_apply_success"] is False
+    assert entry["resource_expectations"]["expected"]["per_vm_memory_max_bytes"] == 4294967296
+    assert entry["resource_expectations"]["expected"]["per_vm_cpus"] == 2

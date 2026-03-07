@@ -3,8 +3,8 @@ from typing import List, Dict, Optional, Any
 
 class XenOrchestraConfig(BaseModel):
     url: str = "ws://localhost:8080/api/"
-    username: str = "admin@admin.net"
-    password: str = "admin"
+    username: str = "${XO_USERNAME}"
+    password: str = "${XO_PASSWORD}"
     total_ram_gb: int = 24
     total_cpu_cores: int = 32
     usable_ram_gb: int = 20

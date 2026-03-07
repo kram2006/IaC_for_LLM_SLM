@@ -10,7 +10,7 @@ from eval_utils import extract_terraform_code
 PLACEHOLDER_PATTERN = re.compile(r'^\$\{[^}]+\}$')
 
 class OpenRouterClient:
-    def __init__(self, api_key=None, model_name=None, temperature=0.2, max_tokens=4096, base_url="https://openrouter.ai/api/v1/chat/completions", timeout=300, seed=None):
+    def __init__(self, api_key=None, model_name=None, temperature=0.2, max_tokens=4096, base_url="https://openrouter.ai/api/v1/chat/completions", timeout=300, max_retries=3, seed=None):
         self.api_key = api_key or os.environ.get("OPENROUTER_API_KEY")
         # Try HF_TOKEN if base_url is Hugging Face
         if "huggingface.co" in base_url and not api_key:
@@ -31,7 +31,10 @@ class OpenRouterClient:
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.base_url = base_url
-        self.max_retries = 3
+        try:
+            self.max_retries = max(1, int(max_retries))
+        except (TypeError, ValueError):
+            self.max_retries = 3
         self.timeout = timeout
         self.seed = seed  # FIX D3: Seed for reproducibility
         

@@ -51,6 +51,24 @@ def check_compliance(actual, expected, default_min=None, expected_failure_matche
         return actual is not None and actual >= default_min
     return actual is not None
 
+def _normalize_expected_resources(reqs, vm_count):
+    vm_count = vm_count or 1
+    normalized = {
+        "per_vm_memory_max_bytes": reqs.get('per_vm_memory_max_bytes', reqs.get('memory_max_bytes')),
+        "per_vm_cpus": reqs.get('per_vm_cpus', reqs.get('cpus')),
+        "per_vm_size_bytes": reqs.get('per_vm_size_bytes', reqs.get('size_bytes')),
+        "total_memory_max_bytes": reqs.get('total_memory_max_bytes'),
+        "total_cpus": reqs.get('total_cpus'),
+        "total_size_bytes": reqs.get('total_size_bytes'),
+    }
+    if normalized["per_vm_memory_max_bytes"] is None and normalized["total_memory_max_bytes"] is not None:
+        normalized["per_vm_memory_max_bytes"] = round(normalized["total_memory_max_bytes"] / vm_count)
+    if normalized["per_vm_cpus"] is None and normalized["total_cpus"] is not None:
+        normalized["per_vm_cpus"] = round(normalized["total_cpus"] / vm_count)
+    if normalized["per_vm_size_bytes"] is None and normalized["total_size_bytes"] is not None:
+        normalized["per_vm_size_bytes"] = round(normalized["total_size_bytes"] / vm_count)
+    return normalized
+
 def _check_vm_ram(actual_memory, verification_data, terraform_code):
     """Helper to verify if VMs in verification data have expected RAM."""
     if not verification_data.get('vm_details'):
@@ -121,32 +139,20 @@ def generate_dataset_entry(task_data, terraform_code, execution_results, verific
     except (json.JSONDecodeError, TypeError, ValueError):
         reqs = {}
 
-    expected_memory = reqs.get('memory_max_bytes')
-    expected_cpus = reqs.get('cpus')
-    expected_disk = reqs.get('size_bytes')
+    vm_count = reqs.get('count', 1) or 1
+    normalized_requirements = _normalize_expected_resources(reqs, vm_count)
+    expected_memory = normalized_requirements['per_vm_memory_max_bytes']
+    expected_cpus = normalized_requirements['per_vm_cpus']
+    expected_disk = normalized_requirements['per_vm_size_bytes']
 
     actual_total_memory = extract_hcl_total_value("memory_max", terraform_code)
     actual_total_cpus = extract_hcl_total_value("cpus", terraform_code)
     actual_total_disk = extract_hcl_total_value("size", terraform_code)
-    
-    vm_count = reqs.get('count', 1) or 1
-    
-    # Normalize expected values to per-VM only when explicit total fields are provided
-    total_memory = reqs.get('total_memory_max_bytes')
-    total_cpus = reqs.get('total_cpus')
-    total_disk = reqs.get('total_size_bytes')
-    if vm_count > 1:
-        if total_memory:
-             expected_memory = round(total_memory / vm_count)
-        if total_cpus:
-             expected_cpus = round(total_cpus / vm_count)
-        if total_disk:
-             expected_disk = round(total_disk / vm_count)
 
     # Calculate per-VM actual values
-    actual_memory = round(actual_total_memory / vm_count) if actual_total_memory else None
-    actual_cpus = round(actual_total_cpus / vm_count) if actual_total_cpus else None
-    actual_disk = round(actual_total_disk / vm_count) if actual_total_disk else None
+    actual_memory = round(actual_total_memory / vm_count) if actual_total_memory is not None else None
+    actual_cpus = round(actual_total_cpus / vm_count) if actual_total_cpus is not None else None
+    actual_disk = round(actual_total_disk / vm_count) if actual_total_disk is not None else None
 
     # Logic for "Meets Requirements"
     expected_failure_matched = execution_results.get('expected_failure_matched', False)
@@ -238,13 +244,25 @@ def generate_dataset_entry(task_data, terraform_code, execution_results, verific
                 "error_message": plan_res.get('stderr') if plan_res.get('exit_code') != 0 else None
             },
             "terraform_apply": {
-                "status": "success" if apply_res.get('exit_code') == 0 else "failed",
+                "status": "skipped_plan_only" if apply_res.get('status') == "skipped_plan_only" else ("success" if apply_res.get('exit_code') == 0 else "failed"),
                 "command": "terraform apply -auto-approve",
                 "exit_code": apply_res.get('exit_code', 1),
                 "execution_time_seconds": apply_res.get('execution_time_seconds', 0),
                 "error_message": apply_res.get('stderr') if apply_res.get('exit_code') != 0 else None
             },
             "verification": verification_data
+        },
+        "resource_expectations": {
+            "vm_count": vm_count,
+            "expected": normalized_requirements,
+            "actual": {
+                "per_vm_memory_max_bytes": actual_memory,
+                "per_vm_cpus": actual_cpus,
+                "per_vm_size_bytes": actual_disk,
+                "total_memory_max_bytes": actual_total_memory,
+                "total_cpus": actual_total_cpus,
+                "total_size_bytes": actual_total_disk,
+            },
         },
         
         "spec_accuracy": {
@@ -285,7 +303,7 @@ def generate_dataset_entry(task_data, terraform_code, execution_results, verific
                 "terraform_init_success": init_res.get('exit_code') == 0,
                 "terraform_validate_success": val_res.get('exit_code') == 0,
                 "terraform_plan_success": plan_res.get('exit_code') == 0,
-                "terraform_apply_success": final_success,
+                "terraform_apply_success": apply_res.get('status') not in {'skipped', 'skipped_plan_only'} and final_success,
                 "vm_in_xen_orchestra": verification_data.get('vms_exist_in_xo', False),
                 "vm_running": verification_data.get('all_vms_running', False),
                 "vm_has_correct_ram": _check_vm_ram(actual_memory, verification_data, terraform_code),

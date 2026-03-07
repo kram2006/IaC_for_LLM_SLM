@@ -440,7 +440,7 @@ async def main():
                     plan_only=args.plan_only,
                     no_confirm=args.no_confirm,
                     enhance_strat=args.enhance_strat,
-                    return_result=True
+                    return_result=False
                 )
                 # evaluate_task writes dataset JSON before returning; cleanup must happen strictly after that.
                 if (not args.plan_only) and task_spec.get("task_id", "").strip().lower() in INDEPENDENT_TASK_IDS:

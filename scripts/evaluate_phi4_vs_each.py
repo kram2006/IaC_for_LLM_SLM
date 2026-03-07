@@ -133,8 +133,6 @@ def compute_rouge3(data):
 
 
 def compute_codebleu(data):
-    from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
-
     try:
         from tree_sitter import Parser, Language
         import tree_sitter_hcl

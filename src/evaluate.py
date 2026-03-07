@@ -4,9 +4,12 @@ import logging
 import argparse
 import hashlib
 import re
+import json
+import uuid
 import yaml
 import csv
 import asyncio
+from datetime import datetime, timezone
 from dotenv import load_dotenv
 
 # Load environment variables from .env file
@@ -93,6 +96,32 @@ def _order_fixed_benchmark_tasks(dataset_tasks):
     if missing:
         raise ValueError(f"Dataset is missing required benchmark tasks: {', '.join(missing)}")
     return [tasks_by_id[task_id] for task_id in FIXED_BENCHMARK_TASK_ORDER]
+
+def _preserve_tfstate_snapshot(workspace_dir, snapshot_label=None):
+    """Preserve a pre-destroy terraform state snapshot as JSON."""
+    tfstate_path = os.path.join(workspace_dir, "terraform.tfstate")
+    if not os.path.exists(tfstate_path) or os.path.getsize(tfstate_path) == 0:
+        return None
+
+    snapshots_dir = os.path.join(workspace_dir, "state_snapshots")
+    os.makedirs(snapshots_dir, exist_ok=True)
+    label = snapshot_label or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S_%fZ")
+    snapshot_path = os.path.join(snapshots_dir, f"terraform_tfstate_pre_destroy_{label}.json")
+    if os.path.exists(snapshot_path):
+        unique_label = f"{label}_{uuid.uuid4().hex[:8]}"
+        snapshot_path = os.path.join(snapshots_dir, f"terraform_tfstate_pre_destroy_{unique_label}.json")
+
+    try:
+        with open(tfstate_path, "r", encoding="utf-8") as src:
+            tfstate_data = json.load(src)
+        with open(snapshot_path, "w", encoding="utf-8") as dst:
+            json.dump(tfstate_data, dst, indent=2)
+    except (OSError, json.JSONDecodeError) as exc:
+        log_error(f"Failed to preserve terraform state snapshot for {workspace_dir}: {exc}")
+        return None
+
+    log_step(f"Saved pre-destroy terraform state snapshot: {snapshot_path}")
+    return snapshot_path
 
 def load_config(config_path):
     import re
@@ -292,6 +321,10 @@ async def main():
             tfstate_path = os.path.join(cleanup_workspace, "terraform.tfstate")
             if not os.path.exists(tfstate_path):
                 return
+            sanitized_label = re.sub(r"[^A-Za-z0-9_-]+", "_", os.path.basename(cleanup_workspace))
+            normalized_label = re.sub(r"_+", "_", sanitized_label)
+            workspace_label = normalized_label.strip("_")
+            _preserve_tfstate_snapshot(cleanup_workspace, snapshot_label=workspace_label)
             destroy_res = await execute_command(
                 "terraform destroy -auto-approve -no-color",
                 cwd=cleanup_workspace,

@@ -21,7 +21,13 @@ from eval_utils import redact_sensitive_text as redact_eval_sensitive_text, reda
 from spec_checker import DeleteValidation
 from spec_checker import CreateValidation, ReadValidation, UpdateValidation
 from compute_metrics import compute_metrics_for_folder, calculate_pass_at_k
-from evaluate import _validate_local_path, _next_chain_index_after_result, _order_fixed_benchmark_tasks, load_config
+from evaluate import (
+    _validate_local_path,
+    _next_chain_index_after_result,
+    _order_fixed_benchmark_tasks,
+    _preserve_tfstate_snapshot,
+    load_config,
+)
 from eval_core import _extract_infra_context_from_tfstate, _resolve_tfstate_context_path
 from spec_checker import get_plan_json, _extract_vm_resources
 from json_generator import redact_sensitive_text as redact_json_sensitive_text, check_compliance
@@ -533,3 +539,23 @@ def test_order_fixed_benchmark_tasks_raises_for_missing_required_task():
     dataset_tasks = [{"task_id": "C1.1"}, {"task_id": "C1.2"}]
     with pytest.raises(ValueError, match="missing required benchmark tasks"):
         _order_fixed_benchmark_tasks(dataset_tasks)
+
+
+def test_preserve_tfstate_snapshot_writes_named_json_copy(tmp_path):
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+    tfstate_path = workspace_dir / "terraform.tfstate"
+    tfstate_path.write_text('{"resources":[{"type":"xenorchestra_vm"}]}', encoding="utf-8")
+
+    snapshot_path = _preserve_tfstate_snapshot(str(workspace_dir), snapshot_label="C1_1_p1")
+
+    expected = workspace_dir / "state_snapshots" / "terraform_tfstate_pre_destroy_C1_1_p1.json"
+    assert snapshot_path == str(expected)
+    assert expected.exists()
+    assert '"xenorchestra_vm"' in expected.read_text(encoding="utf-8")
+
+
+def test_preserve_tfstate_snapshot_returns_none_when_tfstate_missing(tmp_path):
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+    assert _preserve_tfstate_snapshot(str(workspace_dir), snapshot_label="C1_2_p1") is None

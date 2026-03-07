@@ -84,22 +84,22 @@ Must support pluggable provider adapters with unified interface:
 
 ## 6. Task Execution Architecture
 
-## Supported benchmark set (exactly 10 tasks)
+### Supported benchmark set (exactly 10 tasks)
 `C1.1, C1.2, C1.3, C2.2, C2.3, R1.2, U1.2, D1.2, D2.2, C5.2`
 
-## Independent tasks
+### Independent tasks
 - `C1.1, C1.2, C2.2, C5.2`
 
-## Chain A
+### Chain A
 - `C1.3 -> U1.2 -> D1.2`
 
-## Chain B
+### Chain B
 - `C2.3 -> R1.2 -> D2.2`
 
 ### Chain execution requirements
 - Preserve explicit order from chain definition.
 - Reject unknown/missing chain task IDs.
-- READ steps in chains must run in non-mutating mode and must not contaminate apply metrics.
+- READ steps in chains must run in non-mutating mode and must not increment apply-success counters or contribute to apply-based pass@k rates.
 - Workspace policy:
   - shared workspace for lifecycle continuity where needed,
   - isolated non-mutating workspace for READ verification when required.

@@ -7,7 +7,7 @@
   - Latest run: `in_progress`
   - Recent completed runs: `success`
   - No failed jobs were reported for current run.
-- `IaC.pdf` was **not present** in the repository checkout (`**/*.pdf` returned no matches), so paper-to-code comparison is limited to references in source comments and README.
+- `IaC.pdf` (the referenced research paper describing the benchmark methodology) was **not present** in the repository checkout (`**/*.pdf` returned no matches), so paper-to-code comparison is limited to references in source comments and README.
 
 ---
 
@@ -63,7 +63,7 @@
 
 ## 4) Confirmed Technical Issues
 
-## Critical / High Impact
+### Critical / High Impact
 
 ### A. Experiment script uses wrong output folders for metrics aggregation
 - **File:** `run_experiments.sh` lines 66–69
@@ -103,7 +103,7 @@
 
 ---
 
-## Medium Impact / Design Weaknesses
+### Medium Impact / Design Weaknesses
 
 ### G. Legacy/duplicate evaluation stacks increase maintenance risk
 - **Files:** `src/compute_metrics.py` and `scripts/compute_metrics.py`; plus large legacy scripts under `scripts/`

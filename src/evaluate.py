@@ -239,7 +239,8 @@ async def main():
         
         has_previous_run = None
         workspace_dir = None
-        strategy_suffix = f"_{args.enhance_strat.lower()}" if args.enhance_strat else ""
+        base_folder_name = model_config.get('folder_name', model_name)
+        effective_folder_name = f"{base_folder_name}_{args.enhance_strat}" if args.enhance_strat else base_folder_name
         
         if args.chain:
             # Chained mode: Shared workspace for all tasks in this sample
@@ -250,8 +251,8 @@ async def main():
             workspace_dir = os.path.join(
                 args.output_dir,
                 "terraform_code",
-                model_config['folder_name'],
-                f"chain_{chain_slug}_p{pass_num}{strategy_suffix}"
+                effective_folder_name,
+                f"chain_{chain_slug}_p{pass_num}"
             )
             os.makedirs(workspace_dir, exist_ok=True)
             cleanup_workspaces.append(workspace_dir)
@@ -264,8 +265,8 @@ async def main():
                     task_workspace = os.path.join(
                         args.output_dir,
                         "terraform_code",
-                        model_config['folder_name'],
-                        f"chain_{chain_slug}_read_{task_spec['task_id'].replace('.', '_')}_p{pass_num}{strategy_suffix}"
+                        effective_folder_name,
+                        f"chain_{chain_slug}_read_{task_spec['task_id'].replace('.', '_')}_p{pass_num}"
                     )
                     os.makedirs(task_workspace, exist_ok=True)
                     cleanup_workspaces.append(task_workspace)
@@ -290,8 +291,8 @@ async def main():
                 sample_workspace = os.path.join(
                     args.output_dir,
                     "terraform_code",
-                    model_config['folder_name'],
-                    f"{tid}_p{pass_num}{strategy_suffix}"
+                    effective_folder_name,
+                    f"{tid}_p{pass_num}"
                 )
                 os.makedirs(sample_workspace, exist_ok=True)
                 cleanup_workspaces.append(sample_workspace)

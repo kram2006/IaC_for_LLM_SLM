@@ -20,7 +20,14 @@ import time
 import argparse
 import requests
 import re
-from src.eval_utils import extract_terraform_code
+
+try:
+    from src.eval_utils import extract_terraform_code
+except ImportError:
+    src_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "src")
+    if src_dir not in sys.path:
+        sys.path.insert(0, src_dir)
+    from eval_utils import extract_terraform_code
 
 # ─────────────────────────────────────────────────────────────────────────────
 # JUDGE PROMPT TEMPLATE

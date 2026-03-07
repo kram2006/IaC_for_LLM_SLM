@@ -4,9 +4,12 @@ import logging
 import argparse
 import hashlib
 import re
+import json
+import uuid
 import yaml
 import csv
 import asyncio
+from datetime import datetime, timezone
 from dotenv import load_dotenv
 
 # Load environment variables from .env file
@@ -32,6 +35,27 @@ CHAIN_HASH_LENGTH = 16
 PLACEHOLDER_PATTERN = re.compile(r'^\$\{[^}]+\}$')
 DEFAULT_OPENROUTER_TIMEOUT = 300
 DEFAULT_OPENROUTER_MAX_RETRIES = 3
+# Normalized-lowercase IDs for the fixed 10-task benchmark independent cleanup set.
+INDEPENDENT_TASK_IDS = {"c1.1", "c1.2", "c2.2", "c5.2"}
+# Fixed chain fallback rules for the 10-task benchmark:
+# chain 1: C1.3/U1.2 failures fall through to D1.2 cleanup;
+# chain 2: C2.3/R1.2 failures fall through to D2.2 cleanup.
+CHAIN_FALLBACK_DELETE_TASK_BY_FAILURE = {
+    "c1.3": "d1.2",
+    "u1.2": "d1.2",
+    "c2.3": "d2.2",
+    "r1.2": "d2.2",
+}
+FIXED_BENCHMARK_TASK_ORDER = [
+    "c1.1", "c1.2", "c2.2", "c5.2",
+    "c1.3", "u1.2", "d1.2",
+    "c2.3", "r1.2", "d2.2",
+]
+PARTIAL_CHAIN_GROUPS = [
+    ["c1.3", "u1.2", "d1.2"],
+    ["c2.3", "r1.2", "d2.2"],
+]
+PARTIAL_CHAIN_GROUPS_BY_START = {group[0]: group for group in PARTIAL_CHAIN_GROUPS}
 
 def _validate_local_path(path_value, arg_name):
     normalized = os.path.normpath(path_value)
@@ -49,6 +73,55 @@ def _normalize_positive_int(value, fallback):
         return parsed if parsed > 0 else fallback
     except (TypeError, ValueError):
         return fallback
+
+def _next_chain_index_after_result(tasks, current_index, task_success):
+    """Decide next chain index based on task outcome and cleanup progression rules."""
+    if task_success:
+        next_index = current_index + 1
+        return next_index if next_index < len(tasks) else None
+
+    failed_task_id = str(tasks[current_index].get("task_id", "")).strip().lower()
+    fallback_delete_task_id = CHAIN_FALLBACK_DELETE_TASK_BY_FAILURE.get(failed_task_id)
+    if not fallback_delete_task_id:
+        return None
+    for idx in range(current_index + 1, len(tasks)):
+        if str(tasks[idx].get("task_id", "")).strip().lower() == fallback_delete_task_id:
+            return idx
+    return None
+
+def _order_fixed_benchmark_tasks(dataset_tasks):
+    """Return tasks in fixed benchmark order for the 10-task evaluation scope."""
+    tasks_by_id = {str(row.get("task_id", "")).strip().lower(): row for row in dataset_tasks}
+    missing = [task_id for task_id in FIXED_BENCHMARK_TASK_ORDER if task_id not in tasks_by_id]
+    if missing:
+        raise ValueError(f"Dataset is missing required benchmark tasks: {', '.join(missing)}")
+    return [tasks_by_id[task_id] for task_id in FIXED_BENCHMARK_TASK_ORDER]
+
+def _preserve_tfstate_snapshot(workspace_dir, snapshot_label=None):
+    """Preserve a pre-destroy terraform state snapshot as JSON."""
+    tfstate_path = os.path.join(workspace_dir, "terraform.tfstate")
+    if not os.path.exists(tfstate_path) or os.path.getsize(tfstate_path) == 0:
+        return None
+
+    snapshots_dir = os.path.join(workspace_dir, "state_snapshots")
+    os.makedirs(snapshots_dir, exist_ok=True)
+    label = snapshot_label or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S_%fZ")
+    snapshot_path = os.path.join(snapshots_dir, f"terraform_tfstate_pre_destroy_{label}.json")
+    if os.path.exists(snapshot_path):
+        unique_label = f"{label}_{uuid.uuid4().hex[:8]}"
+        snapshot_path = os.path.join(snapshots_dir, f"terraform_tfstate_pre_destroy_{unique_label}.json")
+
+    try:
+        with open(tfstate_path, "r", encoding="utf-8") as src:
+            tfstate_data = json.load(src)
+        with open(snapshot_path, "w", encoding="utf-8") as dst:
+            json.dump(tfstate_data, dst, indent=2)
+    except (OSError, json.JSONDecodeError) as exc:
+        log_error(f"Failed to preserve terraform state snapshot for {workspace_dir}: {exc}")
+        return None
+
+    log_step(f"Saved pre-destroy terraform state snapshot: {snapshot_path}")
+    return snapshot_path
 
 def load_config(config_path):
     import re
@@ -215,6 +288,9 @@ async def main():
             return
 
         tasks = [all_tasks_by_id[tid] for tid in chain_ids]
+    elif not args.task_id:
+        # Fixed benchmark mode: deterministic, non-parallel ordered execution.
+        tasks = _order_fixed_benchmark_tasks(dataset_tasks)
 
     # Pass@k Loop
     num_passes = args.samples
@@ -237,11 +313,27 @@ async def main():
             'TF_VAR_xo_password': xo_cfg.get('password') or os.environ.get('XO_PASSWORD', '')
         }
         
-        has_previous_run = None
         workspace_dir = None
         base_folder_name = model_config.get('folder_name', model_name)
         effective_folder_name = f"{base_folder_name}_{args.enhance_strat}" if args.enhance_strat else base_folder_name
         
+        async def cleanup_workspace_if_state_exists(cleanup_workspace):
+            tfstate_path = os.path.join(cleanup_workspace, "terraform.tfstate")
+            if not os.path.exists(tfstate_path):
+                return
+            sanitized_label = re.sub(r"[^A-Za-z0-9_-]+", "_", os.path.basename(cleanup_workspace))
+            normalized_label = re.sub(r"_+", "_", sanitized_label)
+            workspace_label = normalized_label.strip("_")
+            _preserve_tfstate_snapshot(cleanup_workspace, snapshot_label=workspace_label)
+            destroy_res = await execute_command(
+                "terraform destroy -auto-approve -no-color",
+                cwd=cleanup_workspace,
+                timeout=300,
+                env=tf_env
+            )
+            if destroy_res.get('exit_code') != 0:
+                log_error(f"Cleanup failed for {cleanup_workspace}: {destroy_res.get('stderr', '')}")
+
         if args.chain:
             # Chained mode: Shared workspace for all tasks in this sample
             chain_ids = [t['task_id'].replace('.', '_') for t in tasks]
@@ -257,10 +349,15 @@ async def main():
             os.makedirs(workspace_dir, exist_ok=True)
             cleanup_workspaces.append(workspace_dir)
             
-            for i, task_spec in enumerate(tasks):
+            i = 0
+            while i < len(tasks):
+                task_spec = tasks[i]
                 task_category = task_spec.get('category', '').strip().upper()
                 task_plan_only = args.plan_only or (task_category == 'READ')
                 task_workspace = workspace_dir
+                # Keep dependent-context tfstate sourced from shared chain workspace
+                # even when READ executes in an isolated read workspace.
+                state_workspace_for_dependent_context = workspace_dir
                 if task_category == 'READ':
                     task_workspace = os.path.join(
                         args.output_dir,
@@ -271,23 +368,94 @@ async def main():
                     os.makedirs(task_workspace, exist_ok=True)
                     cleanup_workspaces.append(task_workspace)
 
-                has_previous_run = await evaluate_task(
+                task_result = await evaluate_task(
                     task=task_spec,
                     config=expanded_config,
                     client=client,
                     output_dir=args.output_dir,
                     workspace_override=task_workspace,
-                    initial_history=has_previous_run,
                     plan_only=task_plan_only,
                     sample_num=pass_num,
                     chain_index=i,
+                    state_workspace_override=state_workspace_for_dependent_context,
                     no_confirm=args.no_confirm,
-                    enhance_strat=args.enhance_strat
+                    enhance_strat=args.enhance_strat,
+                    return_result=True
                 )
+                next_index = _next_chain_index_after_result(tasks, i, task_result.get("success", False))
+                if next_index is None:
+                    break
+                is_fallback_jump = next_index > i + 1
+                if is_fallback_jump:
+                    log_step(
+                        f"Task {task_spec.get('task_id')} failed; skipping intermediate chain tasks and continuing with cleanup task {tasks[next_index].get('task_id')}"
+                    )
+                i = next_index
         else:
             # Standalone mode: Each task gets its own workspace path
+            task_lookup = {str(t.get("task_id", "")).strip().lower(): t for t in tasks}
+            processed_chain_ids = set()
             for task_spec in tasks:
-                tid = task_spec['task_id'].replace('.', '_')
+                task_id_normalized = str(task_spec.get("task_id", "")).strip().lower()
+                if task_id_normalized in processed_chain_ids:
+                    continue
+
+                chain_group = PARTIAL_CHAIN_GROUPS_BY_START.get(task_id_normalized)
+                if chain_group:
+                    chain_tasks = [task_lookup[tid] for tid in chain_group if tid in task_lookup]
+                    if len(chain_tasks) == len(chain_group):
+                        chain_task_names = [t.get('task_id', '').replace('.', '_') for t in chain_tasks]
+                        chain_slug = "_".join(chain_task_names)
+                        if len(chain_slug) > MAX_CHAIN_SLUG_LENGTH:
+                            chain_slug = hashlib.sha256(chain_slug.encode("utf-8")).hexdigest()[:CHAIN_HASH_LENGTH]
+                        shared_chain_workspace = os.path.join(
+                            args.output_dir,
+                            "terraform_code",
+                            effective_folder_name,
+                            f"chain_{chain_slug}_p{pass_num}"
+                        )
+                        os.makedirs(shared_chain_workspace, exist_ok=True)
+                        cleanup_workspaces.append(shared_chain_workspace)
+                        i = 0
+                        while i < len(chain_tasks):
+                            chain_task_spec = chain_tasks[i]
+                            chain_task_category = chain_task_spec.get('category', '').strip().upper()
+                            chain_task_plan_only = args.plan_only or (chain_task_category == 'READ')
+                            chain_task_workspace = shared_chain_workspace
+                            # Keep dependent-context tfstate sourced from shared chain workspace
+                            # even when READ executes in an isolated read workspace.
+                            chain_state_workspace_for_dependent_context = shared_chain_workspace
+                            if chain_task_category == 'READ':
+                                chain_task_workspace = os.path.join(
+                                    args.output_dir,
+                                    "terraform_code",
+                                    effective_folder_name,
+                                    f"chain_{chain_slug}_read_{chain_task_spec.get('task_id', '').replace('.', '_')}_p{pass_num}"
+                                )
+                                os.makedirs(chain_task_workspace, exist_ok=True)
+                                cleanup_workspaces.append(chain_task_workspace)
+                            chain_result = await evaluate_task(
+                                task=chain_task_spec,
+                                config=expanded_config,
+                                client=client,
+                                output_dir=args.output_dir,
+                                workspace_override=chain_task_workspace,
+                                plan_only=chain_task_plan_only,
+                                sample_num=pass_num,
+                                chain_index=i,
+                                state_workspace_override=chain_state_workspace_for_dependent_context,
+                                no_confirm=args.no_confirm,
+                                enhance_strat=args.enhance_strat,
+                                return_result=True
+                            )
+                            next_index = _next_chain_index_after_result(chain_tasks, i, chain_result.get("success", False))
+                            if next_index is None:
+                                break
+                            i = next_index
+                        processed_chain_ids.update(chain_group)
+                        continue
+
+                tid = task_spec.get('task_id', '').replace('.', '_')
                 sample_workspace = os.path.join(
                     args.output_dir,
                     "terraform_code",
@@ -306,27 +474,28 @@ async def main():
                     sample_num=pass_num,
                     plan_only=args.plan_only,
                     no_confirm=args.no_confirm,
-                    enhance_strat=args.enhance_strat
+                    enhance_strat=args.enhance_strat,
+                    return_result=False
                 )
+                # evaluate_task writes dataset JSON before returning; cleanup must happen strictly after that.
+                if (not args.plan_only) and task_spec.get("task_id", "").strip().lower() in INDEPENDENT_TASK_IDS:
+                    await cleanup_workspace_if_state_exists(sample_workspace)
 
-        should_cleanup = not args.plan_only and args.samples > 1
+        # Post-sample cleanup remains only for non-chain, multi-sample apply runs.
+        should_cleanup = (
+            (not args.plan_only)
+            and args.samples > 1
+            and (not args.chain)
+        )
         if should_cleanup:
             for cleanup_workspace in cleanup_workspaces:
-                tfstate_path = os.path.join(cleanup_workspace, "terraform.tfstate")
-                if not os.path.exists(tfstate_path):
-                    continue
-                destroy_res = await execute_command(
-                    "terraform destroy -auto-approve -no-color",
-                    cwd=cleanup_workspace,
-                    timeout=300,
-                    env=tf_env
-                )
-                if destroy_res.get('exit_code') != 0:
-                    log_error(f"Post-sample cleanup failed for {cleanup_workspace}: {destroy_res.get('stderr', '')}")
+                await cleanup_workspace_if_state_exists(cleanup_workspace)
         
-        unload_ollama_model(model_config)
-
-    dataset_lock_dir = os.path.join(args.output_dir, "dataset", model_config.get("folder_name", model_name))
+    base_folder_name = model_config.get("folder_name", model_name)
+    # Lock is scoped to the effective output folder (model + optional enhance strategy suffix)
+    # so independent strategy runs can proceed without sharing a dataset directory/lock.
+    effective_lock_folder = f"{base_folder_name}_{args.enhance_strat}" if args.enhance_strat else base_folder_name
+    dataset_lock_dir = os.path.join(args.output_dir, "dataset", effective_lock_folder)
     os.makedirs(dataset_lock_dir, exist_ok=True)
     lockfile_path = os.path.join(dataset_lock_dir, ".evaluation_in_progress")
     if os.path.exists(lockfile_path):
@@ -340,18 +509,20 @@ async def main():
         with open(lockfile_path, "w", encoding="utf-8") as lock_file:
             lock_file.write(f"model={model_name}\n")
 
-        if not args.plan_only and num_passes > 1:
-            print(f"\n{BOLD}{CYAN}>>> Running {num_passes} samples sequentially for apply-mode isolation...{RESET}")
-            for p in range(pass_start, pass_start + num_passes):
-                await run_sample(p)
-        else:
-            print(f"\n{BOLD}{CYAN}>>> Launching {num_passes} parallel samples...{RESET}")
-            sample_tasks = [run_sample(p) for p in range(pass_start, pass_start + num_passes)]
-            results = await asyncio.gather(*sample_tasks, return_exceptions=True)
-            exceptions = [result for result in results if isinstance(result, Exception)]
-            if exceptions:
-                raise exceptions[0]
+        print(f"\n{BOLD}{CYAN}>>> Running {num_passes} samples in parallel...{RESET}")
+        if num_passes > 1:
+            log_step("Parallel sampling increases provider/API and local resource usage. Tune --samples to your capacity.")
+        sample_results = await asyncio.gather(
+            *(run_sample(p) for p in range(pass_start, pass_start + num_passes)),
+            return_exceptions=True
+        )
+        sample_failures = [res for res in sample_results if isinstance(res, Exception)]
+        if sample_failures:
+            for idx, failure in enumerate(sample_failures, start=1):
+                log_error(f"Sample failure {idx}/{len(sample_failures)}: {failure}")
+            raise RuntimeError(f"{len(sample_failures)} sample(s) failed during parallel execution.")
     finally:
+        unload_ollama_model(model_config)
         if os.path.exists(lockfile_path):
             os.remove(lockfile_path)
 

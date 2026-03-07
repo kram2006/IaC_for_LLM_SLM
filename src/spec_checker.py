@@ -188,6 +188,7 @@ class UpdateValidation(ValidationStrategy):
         if forbidden:
             details['had_replace_actions'] = any(r['action'] == 'replace' for r in forbidden)
             errors.append(f"SPEC ERROR: UPDATE task should not create/delete/replace VMs (found {forbidden[0]['action']}).")
+            return errors, checks, details
         
         if not updates:
             errors.append("SPEC ERROR: No update actions found in plan.")

@@ -6,6 +6,7 @@ import csv
 import re
 import asyncio
 import shlex
+from pathlib import Path
 
 import pytest
 
@@ -20,7 +21,14 @@ from eval_utils import redact_sensitive_text as redact_eval_sensitive_text, reda
 from spec_checker import DeleteValidation
 from spec_checker import CreateValidation, ReadValidation, UpdateValidation
 from compute_metrics import compute_metrics_for_folder, calculate_pass_at_k
-from evaluate import _validate_local_path, load_config
+from evaluate import (
+    _validate_local_path,
+    _next_chain_index_after_result,
+    _order_fixed_benchmark_tasks,
+    _preserve_tfstate_snapshot,
+    load_config,
+)
+from eval_core import _extract_infra_context_from_tfstate, _resolve_tfstate_context_path, _verify_vms_with_retry
 from spec_checker import get_plan_json, _extract_vm_resources
 from json_generator import redact_sensitive_text as redact_json_sensitive_text, check_compliance
 from json_generator import generate_dataset_entry
@@ -270,6 +278,15 @@ def test_update_validation_rejects_create_delete_replace():
     assert any("should not create/delete/replace" in e for e in errors)
     assert details.get("had_replace_actions") is True
 
+def test_update_validation_returns_early_when_forbidden_actions_present():
+    validator = UpdateValidation()
+    vm_resources = [{"action": "replace"}]
+    specs = {"updated_field": "cpus", "new_value": 2}
+    errors, checks, _ = validator.validate(vm_resources, specs)
+    assert any("should not create/delete/replace" in e for e in errors)
+    assert all("No update actions found" not in e for e in errors)
+    assert checks == ["action_type_only_update"]
+
 
 def test_update_validation_handles_zero_new_value():
     validator = UpdateValidation()
@@ -286,6 +303,36 @@ def test_read_validation_detects_non_vm_resource_changes():
     errors, checks, _ = validator.validate(changes, {})
     assert "no_resource_changes" in checks
     assert any("must not modify infrastructure" in e for e in errors)
+
+def test_verify_vms_with_retry_retries_and_returns_last_result():
+    class _StubXOClient:
+        def __init__(self):
+            self.calls = 0
+            self.force_refresh_values = []
+        async def verify_vms(self, force_refresh=False):
+            self.calls += 1
+            self.force_refresh_values.append(force_refresh)
+            return {"actual_vm_count": self.calls, "force_refresh": force_refresh}
+
+    xo_client = _StubXOClient()
+    result = asyncio.run(_verify_vms_with_retry(xo_client, attempts=3, delay_seconds=0))
+    assert xo_client.calls == 3
+    assert xo_client.force_refresh_values == [True, True, True]
+    assert result["actual_vm_count"] == 3
+    assert result["force_refresh"] is True
+
+def test_verify_vms_with_retry_handles_non_positive_attempts_and_negative_delay():
+    class _StubXOClient:
+        def __init__(self):
+            self.calls = 0
+        async def verify_vms(self, force_refresh=False):
+            self.calls += 1
+            return {"actual_vm_count": self.calls}
+
+    xo_client = _StubXOClient()
+    result = asyncio.run(_verify_vms_with_retry(xo_client, attempts=0, delay_seconds=-5))
+    assert xo_client.calls == 1
+    assert result["actual_vm_count"] == 1
 
 
 def test_delete_validation_enforces_zero_delete_count():
@@ -446,3 +493,108 @@ def test_evaluate_chain_rejects_unknown_task_ids():
     )
     assert result.returncode == 0
     assert "Unknown task IDs in --chain" in result.stdout
+
+
+def test_next_chain_index_after_result_respects_cleanup_progression():
+    chain_tasks = [
+        {"task_id": "C1.3", "category": "CREATE"},
+        {"task_id": "U1.2", "category": "UPDATE"},
+        {"task_id": "D1.2", "category": "DELETE"},
+    ]
+    assert _next_chain_index_after_result(chain_tasks, 0, True) == 1
+    assert _next_chain_index_after_result(chain_tasks, 0, False) == 2
+    assert _next_chain_index_after_result(chain_tasks, 1, False) == 2
+    assert _next_chain_index_after_result(chain_tasks, 2, False) is None
+
+
+def test_next_chain_index_after_result_chain2_falls_back_to_d2_2():
+    chain_tasks = [
+        {"task_id": "C2.3", "category": "CREATE"},
+        {"task_id": "R1.2", "category": "READ"},
+        {"task_id": "D2.2", "category": "DELETE"},
+    ]
+    assert _next_chain_index_after_result(chain_tasks, 0, False) == 2
+    assert _next_chain_index_after_result(chain_tasks, 1, False) == 2
+
+
+def test_evaluate_orchestration_does_not_pass_previous_history_between_chain_tasks():
+    evaluate_source = Path(SRC_DIR, "evaluate.py").read_text(encoding="utf-8")
+    assert "initial_history=previous_messages" not in evaluate_source
+    assert "initial_history=previous_chain_messages" not in evaluate_source
+
+
+def test_extract_infra_context_from_tfstate_returns_ids_and_uuids(tmp_path):
+    tfstate_path = tmp_path / "terraform.tfstate"
+    tfstate_path.write_text(
+        """
+{
+  "resources": [
+    {
+      "mode": "data",
+      "type": "xenorchestra_pool",
+      "instances": [
+        {"attributes": {"id": "pool-id-1", "name_label": "DAO-Agentic-Infra"}}
+      ]
+    },
+    {
+      "mode": "managed",
+      "type": "xenorchestra_vm",
+      "instances": [
+        {"attributes": {"id": "vm-id-1", "uuid": "vm-uuid-1", "name_label": "app-01", "cpus": 2, "memory_max": 4294967296}}
+      ]
+    }
+  ]
+}
+""".strip(),
+        encoding="utf-8"
+    )
+
+    context = _extract_infra_context_from_tfstate(str(tfstate_path))
+    assert context["data_resources"][0]["id"] == "pool-id-1"
+    assert context["managed_vms"][0]["id"] == "vm-id-1"
+    assert context["managed_vms"][0]["uuid"] == "vm-uuid-1"
+
+
+def test_resolve_tfstate_context_path_defaults_to_execution_workspace():
+    path = _resolve_tfstate_context_path("/tmp/exec_workspace")
+    assert path == "/tmp/exec_workspace/terraform.tfstate"
+
+
+def test_resolve_tfstate_context_path_prefers_state_workspace_override():
+    path = _resolve_tfstate_context_path("/tmp/read_workspace", "/tmp/shared_chain_workspace")
+    assert path == "/tmp/shared_chain_workspace/terraform.tfstate"
+
+
+def test_order_fixed_benchmark_tasks_returns_expected_sequence():
+    task_ids = ["D2.2", "C2.2", "C1.1", "U1.2", "C2.3", "R1.2", "C5.2", "D1.2", "C1.3", "C1.2"]
+    dataset_tasks = [{"task_id": tid} for tid in task_ids]
+    ordered = _order_fixed_benchmark_tasks(dataset_tasks)
+    assert [row["task_id"].lower() for row in ordered] == [
+        "c1.1", "c1.2", "c2.2", "c5.2", "c1.3", "u1.2", "d1.2", "c2.3", "r1.2", "d2.2"
+    ]
+
+
+def test_order_fixed_benchmark_tasks_raises_for_missing_required_task():
+    dataset_tasks = [{"task_id": "C1.1"}, {"task_id": "C1.2"}]
+    with pytest.raises(ValueError, match="missing required benchmark tasks"):
+        _order_fixed_benchmark_tasks(dataset_tasks)
+
+
+def test_preserve_tfstate_snapshot_writes_named_json_copy(tmp_path):
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+    tfstate_path = workspace_dir / "terraform.tfstate"
+    tfstate_path.write_text('{"resources":[{"type":"xenorchestra_vm"}]}', encoding="utf-8")
+
+    snapshot_path = _preserve_tfstate_snapshot(str(workspace_dir), snapshot_label="C1_1_p1")
+
+    expected = workspace_dir / "state_snapshots" / "terraform_tfstate_pre_destroy_C1_1_p1.json"
+    assert snapshot_path == str(expected)
+    assert expected.exists()
+    assert '"xenorchestra_vm"' in expected.read_text(encoding="utf-8")
+
+
+def test_preserve_tfstate_snapshot_returns_none_when_tfstate_missing(tmp_path):
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+    assert _preserve_tfstate_snapshot(str(workspace_dir), snapshot_label="C1_2_p1") is None

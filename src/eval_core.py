@@ -21,8 +21,72 @@ VALID_TASK_CATEGORIES = {"CREATE", "READ", "UPDATE", "DELETE"}
 # Keep only a bounded tail of retry errors to prevent unbounded in-memory context growth.
 MAX_ERROR_HISTORY = 5
 RESOURCE_EXHAUSTION_MARKERS = ('insufficient memory', 'out of memory', 'not enough memory')
+# Normalized-lowercase IDs for fixed benchmark tasks that require dependent context enrichment.
+DEPENDENT_CONTEXT_TASK_IDS = {"u1.2", "d1.2", "r1.2", "d2.2"}
+POST_STATE_RETRY_ATTEMPTS = 3
+POST_STATE_RETRY_DELAY_SECONDS = 2
 
-async def evaluate_task(task, config, client, output_dir, workspace_override=None, initial_history=None, plan_only=False, sample_num=0, chain_index=0, no_confirm=False, enhance_strat=""):
+
+def _resolve_tfstate_context_path(workspace_dir, state_workspace_override=None):
+    """Return terraform.tfstate path used for dependent-context injection."""
+    context_workspace = state_workspace_override or workspace_dir
+    return os.path.join(context_workspace, "terraform.tfstate")
+
+def _extract_infra_context_from_tfstate(tfstate_path):
+    """Extract a compact, identifier-focused infrastructure summary from terraform.tfstate."""
+    try:
+        with open(tfstate_path, "r", encoding="utf-8") as f:
+            tfstate = json.load(f)
+    except (OSError, json.JSONDecodeError) as exc:
+        return {"error": f"Failed to parse terraform state: {exc}"}
+
+    context = {"data_resources": [], "managed_vms": []}
+    for resource in tfstate.get("resources", []):
+        resource_type = resource.get("type")
+        mode = resource.get("mode")
+        instances = resource.get("instances", [])
+        if not instances:
+            continue
+
+        for instance in instances:
+            attrs = instance.get("attributes") or {}
+            if not isinstance(attrs, dict):
+                continue
+
+            if mode == "data":
+                entry = {"type": resource_type}
+                # Keep identifier-level fields most useful to downstream prompts (IDs/labels/pool/network linkage).
+                for key in ("id", "uuid", "name_label", "pool_id", "bridge"):
+                    if attrs.get(key) is not None:
+                        entry[key] = attrs.get(key)
+                if len(entry) > 1:
+                    context["data_resources"].append(entry)
+            elif mode == "managed" and resource_type == "xenorchestra_vm":
+                vm_entry = {}
+                # Keep VM identity + sizing fields that help UPDATE/DELETE dependent tasks reason about targets.
+                for key in ("id", "uuid", "name_label", "name", "cpus", "memory_max", "power_state"):
+                    if attrs.get(key) is not None:
+                        vm_entry[key] = attrs.get(key)
+                if vm_entry:
+                    context["managed_vms"].append(vm_entry)
+
+    return context
+
+async def _verify_vms_with_retry(xo_client, attempts=POST_STATE_RETRY_ATTEMPTS, delay_seconds=POST_STATE_RETRY_DELAY_SECONDS):
+    """Retry XO verification to reduce eventual-consistency false negatives right after apply.
+    Negative delays are treated as 0 seconds.
+    """
+    last_result = None
+    total_attempts = max(1, int(attempts or 1))
+    safe_delay_seconds = max(0, delay_seconds)
+    for attempt in range(total_attempts):
+        last_result = await xo_client.verify_vms(force_refresh=True)
+        if attempt < total_attempts - 1:
+            await asyncio.sleep(safe_delay_seconds)
+    # verify_vms may return None on transport failures; keep a stable dict shape for downstream checks.
+    return last_result if last_result is not None else {"actual_vm_count": 0, "vm_details": []}
+
+async def evaluate_task(task, config, client, output_dir, workspace_override=None, initial_history=None, plan_only=False, sample_num=0, chain_index=0, no_confirm=False, enhance_strat="", return_result=False, state_workspace_override=None):
     """
     Core evaluation logic for a single task and sample.
     Orchestrates LLM generation, Terraform execution, and state verification.
@@ -47,7 +111,8 @@ async def evaluate_task(task, config, client, output_dir, workspace_override=Non
         workspace_dir = workspace_override
         log_step(f"Using shared workspace: {workspace_dir}")
     else:
-        workspace_dir = os.path.join(output_dir, "terraform_code", folder_name, task_id)
+        sample_suffix = f"sample_{sample_num}" if sample_num else "sample_0"
+        workspace_dir = os.path.join(output_dir, "terraform_code", folder_name, task_id, sample_suffix)
         os.makedirs(workspace_dir, exist_ok=True)
 
     # 3. Task Log Directory (Artifacts - Always unique to the current task)
@@ -80,21 +145,32 @@ async def evaluate_task(task, config, client, output_dir, workspace_override=Non
         'TF_VAR_xo_password': xo_cfg.get('password', '')
     }
     
-    if workspace_override:
-        tfstate_path = os.path.join(workspace_dir, "terraform.tfstate")
+    raw_task_id = str(task.get("task_id", "")).strip().lower()
+    has_shared_workspace = bool(workspace_override)
+    is_dependent_chain_step = chain_index > 0
+    is_dependent_context_task = raw_task_id in DEPENDENT_CONTEXT_TASK_IDS
+    should_inject_dependent_context = has_shared_workspace and is_dependent_chain_step and is_dependent_context_task
+    if should_inject_dependent_context:
+        tfstate_path = _resolve_tfstate_context_path(workspace_dir, state_workspace_override)
         if os.path.exists(tfstate_path) and os.path.getsize(tfstate_path) > 10:
             try:
-                with open(tfstate_path, "r", encoding="utf-8") as f:
-                    tfstate_content = f.read()
-                # FLAW FIX: Cap tfstate to 4000 chars to prevent system prompt bloat
-                if len(tfstate_content) > 4000:
-                    tfstate_content = tfstate_content[:4000] + "\n... [TRUNCATED - full state in terraform.tfstate]"
-                system_prompt += f"\n\nExisting Infrastructure (CURRENT STATE from terraform.tfstate):\n```json\n{tfstate_content}\n```\n"
-                log_step("Injected terraform.tfstate into system prompt to save context memory")
+                infra_context = _extract_infra_context_from_tfstate(tfstate_path)
+                tfstate_context = json.dumps(infra_context, indent=2)
+                if len(tfstate_context) > 4000:
+                    tfstate_context = tfstate_context[:4000] + "\n... [TRUNCATED - extracted context]"
+                system_prompt += (
+                    "\n\nCurrent infrastructure details extracted from previous terraform state "
+                    "(relevant identifiers and VM details only):\n"
+                    f"```json\n{tfstate_context}\n```\n"
+                )
+                log_step(
+                    "Injected extracted terraform state context into system prompt for dependent task "
+                    f"from {tfstate_path}"
+                )
             except Exception as e:
                 log_error(f"Failed to read tfstate for context: {e}")
         else:
-            log_step("No terraform.tfstate found yet (first task or failed apply). Proceeding without state context.")
+            log_step("No terraform.tfstate found yet for dependent task. Proceeding without state context.")
                 
     user_prompt = task['prompt']
     if enhance_strat == "COT":
@@ -341,7 +417,7 @@ provider "xenorchestra" {{
         break
 
     if not plan_only:
-        post_verification = await xo_client.verify_vms(force_refresh=True)
+        post_verification = await _verify_vms_with_retry(xo_client)
     else:
         post_verification = {"actual_vm_count": 0, "vm_details": [], "note": "Skipped (plan-only mode)"}
     
@@ -362,4 +438,6 @@ provider "xenorchestra" {{
         verification_data=post_verification, pre_verification_data=pre_verification, config=config
     )
     save_dataset_entry(entry, output_dir, config)
+    if return_result:
+        return {"messages": messages, "success": success}
     return messages

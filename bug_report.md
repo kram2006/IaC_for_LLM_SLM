@@ -1,208 +1,195 @@
 # Bug & Technical Audit Report — IaC_for_LLM_SLM
 
-## 1) Audit Scope and Method
-- Repository audited locally at `/home/runner/work/IaC_for_LLM_SLM/IaC_for_LLM_SLM`.
-- All tracked files were inspected (`git ls-files` = 49 files).
-- CI workflow runs were checked via GitHub Actions API:
-  - Latest run: `in_progress`
-  - Recent completed runs: `success`
-  - No failed jobs were reported for current run.
-- `IaC.pdf` (the referenced research paper describing the benchmark methodology) was **not present** in the repository checkout (`**/*.pdf` returned no matches), so paper-to-code comparison is limited to references in source comments and README.
+## 1) Scope, Method, and Constraints
+- Repository audited at: `/home/runner/work/IaC_for_LLM_SLM/IaC_for_LLM_SLM`
+- Files inspected recursively: **53/53** non-`.git` files in working tree (tracked + untracked docs/artifacts present at audit time).
+- Note on prior counts: earlier reports using `git ls-files` showed fewer files because that command only counts tracked files.
+- CI investigation performed via GitHub Actions API for `kram2006/IaC_for_LLM_SLM`:
+  - Recent runs listed.
+  - Latest completed run inspected for jobs.
+  - No failed jobs found in the inspected recent run.
+- Referenced paper `IaC.pdf` was not present in repository checkout, so paper-comparison is based on repository claims/README and implementation behavior.
 
 ---
 
-## 2) Repository Architecture Summary
+## 2) Architecture Summary
 
-### Core backend components
-- **Orchestration / CLI:** `src/evaluate.py`
-  - Parses CLI args, loads config+dataset, handles task mode vs chain mode, pass sampling, lockfile management.
-- **Task execution loop:** `src/eval_core.py`
-  - Prompt build, LLM call, terraform init/validate/plan/apply, retries, spec checks, post-state checks.
-- **Model clients:** `src/api_client.py`
-  - OpenRouter-compatible HTTP client, Hugging Face inference path, local transformers path.
-- **Execution utils:** `src/eval_utils.py`
-  - Async shell execution, redaction, Terraform apply helper, code extraction.
-- **Spec validator:** `src/spec_checker.py`
-  - Strategy-pattern validators for CREATE/READ/UPDATE/DELETE using Terraform plan JSON.
-- **XO verification:** `src/xo_client.py`
-  - WebSocket JSON-RPC calls to Xen Orchestra; VM inventory validation.
-- **Result schema generation:** `src/json_generator.py`
-  - Builds detailed task-level JSON record and outcome fields.
-- **Metrics:** `src/compute_metrics.py`
-  - pass@k estimator + BLEU + CodeBERT (if installed), grouped by task.
+### Core evaluation pipeline
+- `src/evaluate.py`
+  - CLI entrypoint, config/task loading, fixed 10-task ordering, pass sampling loop, chain orchestration, workspace cleanup.
+- `src/eval_core.py`
+  - Per-task execution loop (prompting, retries, Terraform `init/validate/plan/apply`, spec checks, post-state checks, artifact writes).
+- `src/api_client.py`
+  - Provider calls (OpenRouter/OpenAI-compatible, HF inference, local transformers client).
+- `src/spec_checker.py`
+  - CREATE/READ/UPDATE/DELETE strategy validation against Terraform plan JSON.
+- `src/xo_client.py`
+  - Xen Orchestra websocket access + cached VM verification.
+- `src/json_generator.py`
+  - Normalized JSON result records and final outcome semantics.
+- `src/compute_metrics.py`
+  - Task-level aggregation, pass@k, optional BLEU/CodeBERT metrics.
 
-### Data/config
-- **Tasks dataset:** `tasks/vm_provisioning_tasks.csv` (10 tasks)
-- **Task rules:** `config/task_specs.yaml`
-- **Provider/model config:** `config/openrouter_config.yaml`
-- **Reference Terraform snippets:** `tasks/references/*.tf`
+### Data + specs
+- Task dataset: `tasks/vm_provisioning_tasks.csv`
+- Task constraints: `config/task_specs.yaml`
+- Model/provider config: `config/openrouter_config.yaml`
+- Terraform references: `tasks/references/*.tf`
 
-### Task dependency model verification
-- Independent tasks present: **C1.1, C1.2, C2.2, C5.2** ✅
-- Chain 1 present: **C1.3 → U1.2 → D1.2** ✅
-- Chain 2 present: **C2.3 → R1.2 → D2.2** ✅
-- In code, chain ordering is preserved from `--chain` argument order (`evaluate.py`).
+### Supported 10-task benchmark (verified)
+- Independent: `C1.1, C1.2, C2.2, C5.2`
+- Chain 1: `C1.3 -> U1.2 -> D1.2`
+- Chain 2: `C2.3 -> R1.2 -> D2.2`
 
 ---
 
-## 3) Evaluation Pipeline Verification (Expected 9-stage flow)
+## 3) Pipeline Verification Against Expected Benchmark Flow
 
-| Stage | Status | Notes |
-|---|---|---|
-| 1. Task Definition | ✅ | CSV task rows + YAML specs used.
-| 2. Prompt Construction | ✅ | Baseline, CoT, FSP, and repair prompts implemented.
-| 3. Model Execution | ✅ | OpenRouter/HF/local clients integrated.
-| 4. Output Capture | ✅ | Full response + extracted HCL logged per iteration.
-| 5. Static Validation | ✅ | `terraform init/validate/plan` checks.
-| 6. Intent/Constraint Validation | ✅ | `spec_checker` strategy validators by category.
-| 7. Metric Calculation | ⚠️ | pass@k math is correct; semantic/functional labeling has caveats (see issues).
-| 8. Result Logging | ✅ | JSON outputs + per-iteration artifacts.
-| 9. Experiment Metadata | ⚠️ | Metadata exists, but some scripts are inconsistent with folder naming and dataset assumptions.
+Expected stages:
+1. Task Definition
+2. Prompt Construction
+3. Model Execution
+4. Output Capture
+5. Static Validation
+6. Intent/Constraint Validation
+7. Metric Calculation
+8. Result Logging
+9. Experiment Metadata Recording
 
----
-
-## 4) Confirmed Technical Issues
-
-### Critical / High Impact
-
-### A. Experiment script uses wrong output folders for metrics aggregation
-- **File:** `run_experiments.sh` lines 66–69
-- **Issue:** Script computes metrics from `results/dataset/${MODEL}` and suffix variants, but runtime outputs use `folder_name` from config (`Phi4_Ollama_Results`, `phi4_or`, etc.).
-- **Impact:** Post-run metrics commands can target non-existent folders or miss produced files.
-- **Suggested fix:** Resolve output folders from config model metadata or pass explicit folder paths.
-
-### B. Functional "apply" metric label can be misleading in plan-only runs
-- **Files:** `src/eval_core.py` lines 324–329, `src/json_generator.py` lines 285–287, `src/compute_metrics.py` lines 124–182
-- **Issue:** Plan-only successful runs set `execution_successful=True`, and metrics present this as `Pass@k (Apply)`.
-- **Impact:** Dashboard wording implies apply success even when apply was skipped.
-- **Suggested fix:** Separate `plan_success` from `apply_success` metrics and relabel output accordingly.
-
-### C. Chain validation can silently accept partial/invalid chain input
-- **File:** `src/evaluate.py` lines 191–195
-- **Issue:** Unknown task IDs in `--chain` are silently dropped after filtering.
-- **Impact:** Operator may think a full chain ran while only a subset executed.
-- **Suggested fix:** Validate `--chain` IDs strictly and fail fast on missing/invalid IDs.
-
-### D. Outdated auxiliary scripts point to stale dataset paths/prefixes
-- **Files:** `scripts/verify_phi4_codes.py`, `scripts/inject_phi4_into_dataset.py`, `scripts/verify_dataset.py`
-- **Issue:** Defaults assume directories/prefixes not aligned with current config naming or rely on external `comparison/` assets absent in repo.
-- **Impact:** Scripts fail in clean checkout or produce false diagnostics.
-- **Suggested fix:** Centralize path/prefix configuration and validate required assets up front.
-
-### E. `scripts/evaluate_phi4_vs_each.py` has unresolved symbol in CodeBLEU path
-- **File:** `scripts/evaluate_phi4_vs_each.py` line 193
-- **Issue:** `compute_codebleu()` references `sentence_bleu` and `SmoothingFunction` without importing them in that scope.
-- **Impact:** Runtime `NameError` during metric computation.
-- **Suggested fix:** Add local imports in `compute_codebleu()` or module-level import.
-
-### F. Baseline environment requires dependencies before CLI even for `--help`
-- **Files:** `src/evaluate.py`, `src/api_client.py`, `src/xo_client.py`
-- **Issue:** Top-level imports require optional runtime packages (`huggingface_hub`, `websockets`) before argument parsing.
-- **Impact:** `python src/evaluate.py --help` fails in minimally provisioned env.
-- **Suggested fix:** Delay provider-specific imports or provide graceful dependency error messaging.
+Status:
+- 1–8 are implemented and connected in code.
+- Stage 9 is partially implemented (metadata exists in output JSON, but cross-script reproducibility metadata standards are inconsistent).
 
 ---
 
-### Medium Impact / Design Weaknesses
+## 4) Confirmed Bugs / Weaknesses
 
-### G. Legacy/duplicate evaluation stacks increase maintenance risk
-- **Files:** `src/compute_metrics.py` and `scripts/compute_metrics.py`; plus large legacy scripts under `scripts/`
-- **Issue:** Multiple overlapping metric implementations with different assumptions.
-- **Impact:** Results drift, reproducibility confusion, operator error.
-- **Suggested fix:** Declare one canonical metric pipeline and deprecate/archive others.
+## A. Confirmed implementation/documentation mismatches
 
-### H. Inconsistent schema assumptions across scripts
-- **Examples:**
-  - `scripts/evaluate_bleu_codebertscore.py` expects CSV columns like `Prompt`, `Intent`, `Reference output`.
-  - Core pipeline uses `tasks/vm_provisioning_tasks.csv` schema with `task_id`, `prompt`, `resource_requirements`, etc.
-- **Impact:** Auxiliary scripts cannot run on canonical dataset without transformation.
-- **Suggested fix:** Normalize script inputs to one schema or add adapters.
+### A1) README claims parallel pass@k, but evaluator runs samples sequentially
+- **Evidence**
+  - README claims: parallel pass@k (`README.md` features + examples).
+  - Actual execution: sequential `for` loop with `await run_sample(p)` in `src/evaluate.py`.
+- **Impact**
+  - Throughput and runtime expectations are incorrect.
+  - Reported architecture capability is overstated.
+- **Recommended fix (not implemented here)**
+  - Either implement true concurrent sample execution safely, or update README language to “sequential sample execution.”
 
-### I. Hardcoded reference credentials in task reference `.tf` files
-- **Files:** `tasks/references/*.tf`
-- **Issue:** `username = "admin@admin.net"`, `password = "admin"` present in reference artifacts.
-- **Impact:** Not a live secret, but bad security posture for examples and can leak into generated outputs.
-- **Suggested fix:** Replace with placeholders and explicit documentation.
+### A2) Comparison scripts depend on external assets not shipped in core repo flow
+- **Evidence**
+  - `scripts/evaluate_phi4_vs_each.py`, `scripts/verify_dataset.py`, and inject/verification scripts require `comparison/comparison_dataset.json` and specific derived result structures.
+- **Impact**
+  - Fresh users can see script failures despite core benchmark being healthy.
+- **Recommended fix**
+  - Add explicit preflight checks + README section marking these as optional/offline analysis scripts.
 
-### J. Metadata reproducibility gaps in multi-script workflows
-- **Issue:** Core runner supports seed and model metadata, but external scripts do not consistently track model/version/config fingerprints.
-- **Impact:** Hard to compare runs across script families.
-- **Suggested fix:** Standardize run manifest (config hash, dataset hash, model identifier, seed, timestamp, git SHA).
+## B. Architectural and evaluation risks (high-priority)
+
+### B1) Cache staleness risk in post-state validation windows
+- **Evidence**
+  - `src/xo_client.py` uses TTL cache (`_cache_ttl = 10`) with `verify_vms(force_refresh=...)`.
+- **Impact**
+  - In fast CREATE/UPDATE/DELETE sequences, stale XO state can affect post-state checks in edge timing scenarios.
+- **Recommended fix**
+  - Add chain-aware freshness policy (force refresh + retry backoff around post-apply verification).
+
+### B2) Mixed metric stacks in `src/` and `scripts/` can produce divergent results
+- **Evidence**
+  - Canonical metrics in `src/compute_metrics.py`, plus separate metric/evaluation scripts in `scripts/` with different assumptions.
+- **Impact**
+  - Confusingly different benchmark numbers from different entrypoints.
+- **Recommended fix**
+  - Define one canonical metric pipeline and label auxiliary scripts as experimental.
+
+### B3) Reproducibility manifests not standardized across all workflows
+- **Evidence**
+  - Core outputs include useful fields, but there is no single run-manifest schema consistently emitted across all tooling.
+- **Impact**
+  - Harder exact reruns/comparisons across branches/runs.
+- **Recommended fix**
+  - Add run manifest with config hash, dataset hash, model/provider version, seed, git SHA.
+
+## C. Security and operational posture observations
+
+### C1) Reference `.tf` files include placeholder credentials
+- **Evidence**
+  - `tasks/references/*.tf` include `admin` placeholders.
+- **Impact**
+  - Not production secrets, but poor secure-default examples.
+- **Recommended fix**
+  - Replace with explicit placeholders and warning comments in docs.
+
+### C2) Optional-dependency runtime paths should be more explicit
+- **Evidence**
+  - Some features rely on optional extras (HF, code_bert_score, etc.).
+- **Impact**
+  - User confusion when running optional scripts in a minimal environment.
+- **Recommended fix**
+  - Split docs into “core required deps” vs “optional analysis deps.”
 
 ---
 
-## 5) Metrics Validation Findings
+## 5) Metric Validation Summary
 
 ### pass@k
-- **Implementation status:** Core estimator in `src/compute_metrics.py` is mathematically correct (Chen et al. unbiased estimator).
-- **Concern:** Interpretation layer labels apply-centric metrics even when results may be plan-only.
+- Current formula in `src/compute_metrics.py` is mathematically aligned with the standard unbiased estimator.
+- Aggregation is task-level and then averaged.
 
-### Semantic metrics
-- BLEU/CodeBERT are optional and gracefully degrade in core metrics script.
-- Auxiliary scripts use mixed implementations and languages (`lang='python'`, `lang='terraform'`, proxy assumptions) without unified policy.
+### Key caution
+- Ensure consumers differentiate:
+  - `plan_success`
+  - `apply_success`
+  - `meets_requirements`
 
-### Potential evaluation mistakes to avoid (observed risk points)
-- Mixing plan-only and apply outcomes in a single “apply” KPI.
-- Comparing outputs from non-canonical scripts with different tokenization/metric definitions.
-- Treating absent external assets (`comparison/`) as repository bugs instead of optional data dependencies.
-
----
-
-## 6) Dataset and Task Validation Findings
-
-- `tasks/vm_provisioning_tasks.csv` contains exactly **10 tasks**, one row each, no malformed rows.
-- Task set matches required benchmark subset (no extra 13-task legacy execution in core runner).
-- `config/task_specs.yaml` aligns with all 10 tasks, including chain-dependent tasks.
-- Reference HCL files exist for all 10 tasks.
-- Task order in dataset is deterministic; chain execution order follows explicit `--chain` argument ordering.
+The codebase has improved this semantics in result generation, but external scripts must keep the same interpretation to avoid drift.
 
 ---
 
-## 7) Model Execution Validation Findings
-
-### Strengths
-- OpenRouter retry strategy and timeout handling in client.
-- Async Terraform command execution with timeout path.
-- Explicit lockfile (`.evaluation_in_progress`) prevents simultaneous writes in core metrics pipeline.
-
-### Weaknesses
-- Dependency loading is eager (not lazy), reducing CLI robustness.
-- External scripts have inconsistent timeout/retry/error strategies.
-- Some scripts assume local services/files that may not exist by default.
+## 6) Dataset/Task Validation Summary
+- `tasks/vm_provisioning_tasks.csv` contains the active 10-task benchmark rows.
+- Chain logic and fallback behavior are implemented in evaluator orchestration.
+- Dependent-context injection for U1.2/D1.2/R1.2/D2.2 is present.
 
 ---
 
-## 8) Reproducibility Findings
+## 7) Model Execution Validation Summary
+- Provider support present for OpenRouter/OpenAI-compatible, local (Ollama path), and HF inference mode.
+- Timeout/retry handling exists in core API path.
+- Terraform command execution is wrapped with structured status/result outputs.
 
-### Present controls
-- Seed support in evaluate CLI and OpenRouter/local generation paths.
-- Deterministic dataset row order by CSV read order.
-- Per-run artifacts and JSON logs.
-
-### Gaps
-- No single canonical experiment manifest across all script families.
-- Naming/path mismatches in helper scripts can break automated reruns.
-- Optional scripts not pinned to same evaluation semantics as core pipeline.
+Primary gap is not basic functionality but consistency and reproducibility across core vs auxiliary toolchains.
 
 ---
 
-## 9) Suggested Remediation Roadmap (No code changes applied)
+## 8) Reproducibility Assessment
 
-1. **Stabilize core contract**
-   - Enforce strict chain validation.
-   - Split plan vs apply metrics and labels.
-2. **Unify output discovery**
-   - Resolve result directories via config metadata, not model keys.
-3. **Consolidate metrics stack**
-   - Keep one canonical metric implementation.
-4. **Harden script compatibility**
-   - Make auxiliary scripts schema-aware and path-configurable.
-5. **Improve bootstrap UX**
-   - Lazy imports / explicit dependency checks for provider-specific modules.
-6. **Standardize reproducibility metadata**
-   - Emit run manifest including dataset hash + config hash + git SHA + model/version.
+Strengths:
+- Fixed 10-task benchmark ordering in full mode.
+- Seed plumbing exists in model config path.
+- Artifact capture and per-task JSON outputs are detailed.
+
+Gaps:
+- Parallelism claim mismatch vs actual sequential execution.
+- No universal run-manifest contract across all scripts.
+- Auxiliary scripts rely on external datasets and assumptions.
 
 ---
 
-## 10) Final Audit Verdict
-The core backend evaluation framework is structurally sound and already aligned with the **10-task** benchmark and required chains. The biggest practical reliability problems are not in the core CRUD validators themselves, but in **operational consistency**: script/path drift, mixed metric semantics across toolchains, and labeling/contract issues that can mislead benchmark interpretation.
+## 9) Prioritized Remediation Plan (No code changes proposed in this report)
+
+1. **Align contract with implementation**
+   - Fix README “parallel samples” claim or implement true safe concurrency.
+2. **Unify metrics pipeline**
+   - Canonicalize `src/compute_metrics.py`; mark script variants as optional/experimental.
+3. **Standardize reproducibility manifest**
+   - Emit a single run-level manifest JSON for every benchmark invocation.
+4. **Harden post-state freshness**
+   - Add refresh/backoff policy around XO verification after apply.
+5. **Improve optional tooling UX**
+   - Document prerequisites and required external assets for comparison scripts.
+
+---
+
+## 10) Final Verdict
+The repository’s **core benchmark engine is functional and structurally solid** for the active 10-task CRUD evaluation. The most meaningful issues are **evaluation-operational consistency** (contract mismatch, multi-tool metric drift, reproducibility metadata standardization), rather than fundamental absence of pipeline stages.

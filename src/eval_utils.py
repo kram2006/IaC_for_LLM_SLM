@@ -42,6 +42,17 @@ def redact_messages_for_logging(messages):
 
 async def execute_command(command, cwd=None, timeout=None, print_output=True, env=None):
     """Run a shell command asynchronously and return output"""
+    async def _kill_and_reap(proc):
+        if proc.returncode is not None:
+            return
+        try:
+            proc.kill()
+        finally:
+            try:
+                await proc.wait()
+            except Exception:
+                pass
+
     try:
         if print_output:
             print(f"{BOLD}{CYAN}> Running: {command}{RESET}")
@@ -65,19 +76,13 @@ async def execute_command(command, cwd=None, timeout=None, print_output=True, en
             stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
             stdout = stdout.decode() if stdout else ""
             stderr = stderr.decode() if stderr else ""
-        except asyncio.TimeoutExpired:
-            try:
-                process.kill()
-                await process.wait() # CRITICAL: Reaped the zombie process
-            except: pass
+        except asyncio.TimeoutError:
+            await _kill_and_reap(process)
             log_error(f"Command timed out after {timeout}s: {command}")
             return {"status": "timeout", "exit_code": -1, "stdout": "", "stderr": f"Timeout after {timeout}s", "execution_time_seconds": timeout or 0}
         except Exception as e:
             # Handle "I/O operation on closed pipe" or other pipe errors gracefully
-            try:
-                process.kill()
-                await process.wait()
-            except: pass
+            await _kill_and_reap(process)
             log_error(f"Pipe/Process error: {str(e)}")
             return {"status": "error", "exit_code": -1, "stdout": "", "stderr": str(e), "execution_time_seconds": 0}
         

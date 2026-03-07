@@ -25,6 +25,8 @@ python -m pytest tests/test_bug_fixes.py
 
 # 3. Set API Keys and Platform details in .env or config/openrouter_config.yaml
 export OPENROUTER_API_KEY="sk-or-v1-..."
+export XO_USERNAME="your-xo-username"
+export XO_PASSWORD="your-xo-password"
 ```
 
 ## Running Evaluations
@@ -62,6 +64,11 @@ To analyze the difficulty distribution of your reference HCL files:
 ```bash
 python src/complexity_scorer.py
 ```
+
+## Benchmark Scope Note
+
+This repository currently evaluates the active **10-task** benchmark in `tasks/vm_provisioning_tasks.csv`.  
+Historical documentation may reference a 13-task template; those extra tasks are intentionally out of scope for the current runs unless explicitly reintroduced in the dataset CSV.
 
 ## Internal Architecture
 

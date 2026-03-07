@@ -177,7 +177,7 @@ class UpdateValidation(ValidationStrategy):
         
         field = specs.get('updated_field')
         val = specs.get('new_value')
-        if field and val:
+        if field and val is not None:
             checks.append(f"{field}_update")
             for vm in updates:
                 if vm.get(field) != val:
@@ -194,7 +194,7 @@ class DeleteValidation(ValidationStrategy):
             errors.append(f"SPEC ERROR: DELETE task should not create/update/replace VMs (found {forbidden[0]['action']}).")
         
         expected = specs.get('delete_count')
-        if expected and len(deletes) != expected:
+        if expected is not None and len(deletes) != expected:
             errors.append(f"SPEC ERROR: Expected {expected} deletions, found {len(deletes)}.")
 
         target_vms = specs.get('target_vms', [])
@@ -285,7 +285,7 @@ def verify_post_state(pre_vms, post_vms, task_data, specs=None):
                 updated_field = specs.get('updated_field')
                 new_value = specs.get('new_value')
                 
-                if updated_field and new_value:
+                if updated_field and new_value is not None:
                     # Convert memory from GB to bytes if needed
                     if updated_field == 'memory_max':
                         post_value_bytes = int(post_vm.get('ram_gb', 0) * (1024**3))

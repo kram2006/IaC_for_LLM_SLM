@@ -363,7 +363,12 @@ def main():
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
     print("Loading comparison dataset...")
-    data = load_comparison_data()
+    try:
+        data = load_comparison_data()
+    except FileNotFoundError as exc:
+        print(f"[ERROR] {exc}")
+        print("Set COMPARISON_JSON to an existing comparison dataset path before running this script.")
+        return 1
     print(f"  {len(data)} tasks loaded.\n")
 
     all_metrics = {}
@@ -455,4 +460,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main() or 0)

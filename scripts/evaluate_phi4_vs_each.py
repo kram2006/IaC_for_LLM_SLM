@@ -20,11 +20,6 @@ from pathlib import Path
 from collections import Counter
 import argparse
 
-import nltk
-from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
-from nltk.translate.meteor_score import meteor_score as ms
-from rouge_score import rouge_scorer
-
 warnings.filterwarnings("ignore")
 
 # -- Paths --
@@ -45,12 +40,13 @@ REFERENCE_MODELS = [
     {"name": "Qwen 3 Coder",   "prefix": "ref_Qwen_3_Coder",   "slug": "qwen3"},
 ]
 
-# -- NLTK setup --
-for res in ["wordnet", "omw-1.4"]:
-    try:
-        nltk.data.find(f"corpora/{res}")
-    except LookupError:
-        nltk.download(res, quiet=True)
+def _ensure_nltk_resources():
+    import nltk
+    for res in ["wordnet", "omw-1.4"]:
+        try:
+            nltk.data.find(f"corpora/{res}")
+        except LookupError:
+            nltk.download(res, quiet=True)
 
 def _tokenize(text):
     return text.split()
@@ -96,6 +92,7 @@ def load_pair_data(ref_prefix):
 
 # == Metrics ==
 def compute_bleu(data):
+    from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
     smoothie = SmoothingFunction().method1
     scores, per_task = [], []
     for d in data:
@@ -109,6 +106,8 @@ def compute_bleu(data):
 
 
 def compute_meteor(data):
+    from nltk.translate.meteor_score import meteor_score as ms
+    _ensure_nltk_resources()
     scores, per_task = [], []
     for d in data:
         ref_tokens = _tokenize(d["reference"])
@@ -121,6 +120,7 @@ def compute_meteor(data):
 
 
 def compute_rouge3(data):
+    from rouge_score import rouge_scorer
     scorer = rouge_scorer.RougeScorer(['rouge3'], use_stemmer=True)
     scores, per_task = [], []
     for d in data:
@@ -397,7 +397,9 @@ def main():
         OUTPUT_DIR = Path(args.output_dir)
 
     if not COMPARISON_JSON.exists():
-        raise FileNotFoundError(f"comparison dataset not found: {COMPARISON_JSON}")
+        print(f"[ERROR] comparison dataset not found: {COMPARISON_JSON}")
+        print("Provide --comparison-json or --base-dir that contains comparison/comparison_dataset.json.")
+        return
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 

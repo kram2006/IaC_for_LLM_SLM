@@ -522,18 +522,10 @@ async def main():
         with open(lockfile_path, "w", encoding="utf-8") as lock_file:
             lock_file.write(f"model={model_name}\n")
 
-        print(f"\n{BOLD}{CYAN}>>> Running {num_passes} samples in parallel...{RESET}")
-        if num_passes > 1:
-            log_step("Parallel sampling increases provider/API and local resource usage. Tune --samples to your capacity.")
-        sample_results = await asyncio.gather(
-            *(run_sample(p) for p in range(pass_start, pass_start + num_passes)),
-            return_exceptions=True
-        )
-        sample_failures = [res for res in sample_results if isinstance(res, Exception)]
-        if sample_failures:
-            for idx, failure in enumerate(sample_failures, start=1):
-                log_error(f"Sample failure {idx}/{len(sample_failures)}: {failure}")
-            raise RuntimeError(f"{len(sample_failures)} sample(s) failed during parallel execution.")
+        print(f"\n{BOLD}{CYAN}>>> Running {num_passes} sample(s) sequentially...{RESET}")
+        for p in range(pass_start, pass_start + num_passes):
+            log_step(f"Starting sample {p - pass_start + 1}/{num_passes}")
+            await run_sample(p)
     finally:
         unload_ollama_model(model_config)
         if os.path.exists(lockfile_path):

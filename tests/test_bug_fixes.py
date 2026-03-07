@@ -613,6 +613,18 @@ def test_benchmark_mode_uses_sequential_task_execution():
     assert "await run_chain_group(chain_group)" in evaluate_source
 
 
+def test_samples_run_sequentially_not_in_parallel():
+    """Samples must run one-after-another; asyncio.gather over samples is strictly forbidden."""
+    evaluate_source = Path(SRC_DIR, "evaluate.py").read_text(encoding="utf-8")
+    # asyncio.gather must not be used to dispatch multiple samples concurrently.
+    assert "asyncio.gather(" not in evaluate_source
+    # The sequential loop must await each sample individually.
+    assert "await run_sample(p)" in evaluate_source
+    # Log message must describe sequential execution, not parallel.
+    assert "sequentially" in evaluate_source
+    assert "in parallel" not in evaluate_source
+
+
 def test_benchmark_mode_independent_task_ids_are_correct():
     """The four independent task IDs in the benchmark must not belong to any chain group."""
     from evaluate import PARTIAL_CHAIN_GROUPS_BY_START, FIXED_BENCHMARK_TASK_ORDER, INDEPENDENT_TASK_IDS

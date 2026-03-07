@@ -284,7 +284,6 @@ async def main():
             'TF_VAR_xo_password': xo_cfg.get('password') or os.environ.get('XO_PASSWORD', '')
         }
         
-        previous_messages = None
         workspace_dir = None
         base_folder_name = model_config.get('folder_name', model_name)
         effective_folder_name = f"{base_folder_name}_{args.enhance_strat}" if args.enhance_strat else base_folder_name
@@ -342,7 +341,6 @@ async def main():
                     client=client,
                     output_dir=args.output_dir,
                     workspace_override=task_workspace,
-                    initial_history=previous_messages,
                     plan_only=task_plan_only,
                     sample_num=pass_num,
                     chain_index=i,
@@ -351,7 +349,6 @@ async def main():
                     enhance_strat=args.enhance_strat,
                     return_result=True
                 )
-                previous_messages = task_result.get("messages")
                 next_index = _next_chain_index_after_result(tasks, i, task_result.get("success", False))
                 if next_index is None:
                     break
@@ -386,7 +383,6 @@ async def main():
                         )
                         os.makedirs(shared_chain_workspace, exist_ok=True)
                         cleanup_workspaces.append(shared_chain_workspace)
-                        previous_chain_messages = None
                         i = 0
                         while i < len(chain_tasks):
                             chain_task_spec = chain_tasks[i]
@@ -411,7 +407,6 @@ async def main():
                                 client=client,
                                 output_dir=args.output_dir,
                                 workspace_override=chain_task_workspace,
-                                initial_history=previous_chain_messages,
                                 plan_only=chain_task_plan_only,
                                 sample_num=pass_num,
                                 chain_index=i,
@@ -420,7 +415,6 @@ async def main():
                                 enhance_strat=args.enhance_strat,
                                 return_result=True
                             )
-                            previous_chain_messages = chain_result.get("messages")
                             next_index = _next_chain_index_after_result(chain_tasks, i, chain_result.get("success", False))
                             if next_index is None:
                                 break

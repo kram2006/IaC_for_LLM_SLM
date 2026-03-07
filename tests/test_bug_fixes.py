@@ -6,6 +6,7 @@ import csv
 import re
 import asyncio
 import shlex
+from pathlib import Path
 
 import pytest
 
@@ -469,6 +470,12 @@ def test_next_chain_index_after_result_chain2_falls_back_to_d2_2():
     ]
     assert _next_chain_index_after_result(chain_tasks, 0, False) == 2
     assert _next_chain_index_after_result(chain_tasks, 1, False) == 2
+
+
+def test_evaluate_orchestration_does_not_pass_previous_history_between_chain_tasks():
+    evaluate_source = Path(SRC_DIR, "evaluate.py").read_text(encoding="utf-8")
+    assert "initial_history=previous_messages" not in evaluate_source
+    assert "initial_history=previous_chain_messages" not in evaluate_source
 
 
 def test_extract_infra_context_from_tfstate_returns_ids_and_uuids(tmp_path):

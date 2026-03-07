@@ -3,6 +3,7 @@ import csv
 import json
 import subprocess
 import shutil
+import tempfile
 from typing import Dict, Any, List
 
 def fixed_loc(reference: str) -> int:
@@ -78,6 +79,9 @@ def score_dataset(csv_path: str):
             fieldnames.extend(['complexity_loc', 'complexity_resources', 'complexity_interconnections', 'complexity_level'])
             
         for row in reader:
+            overflow = row.pop(None, None)
+            if overflow and isinstance(overflow, list) and overflow:
+                row['complexity_level'] = overflow[0]
             hcl = row.get('reference_hcl', '')
             if not hcl:
                 rows.append(row)
@@ -99,10 +103,17 @@ def score_dataset(csv_path: str):
             rows.append(row)
             
         
-    with open(csv_path, 'w', newline='') as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(rows)
+    tmp_fd, tmp_path = tempfile.mkstemp(prefix=".complexity_", suffix=".csv", dir=os.path.dirname(csv_path) or ".")
+    os.close(tmp_fd)
+    try:
+        with open(tmp_path, 'w', newline='') as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(rows)
+        os.replace(tmp_path, csv_path)
+    finally:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
 
     # ── Resource Type Distribution Summary (R6) ───────────────────────────────
     if resource_counts:

@@ -7,7 +7,10 @@ import requests
 import asyncio
 import re
 import copy
-from logger import log_step, log_error
+try:
+    from logger import log_step, log_error
+except ModuleNotFoundError:
+    from src.logger import log_step, log_error
 
 # ANSI Colors for terminal
 GREEN = "\033[92m"

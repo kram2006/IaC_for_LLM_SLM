@@ -69,7 +69,7 @@ def _extract_vm_resources(plan_json):
             'name': rc.get('name', ''),
             'memory_max': after.get('memory_max'),
             'cpus': after.get('cpus'),
-            'name_label': after.get('name_label'),
+            'name_label': after.get('name_label') or before.get('name_label'),
             'disk_sizes': disk_sizes,
             'before': before
         })

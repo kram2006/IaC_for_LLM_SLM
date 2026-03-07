@@ -17,7 +17,7 @@ Backend-only evaluation framework to benchmark SLMs/LLMs on Terraform generation
   - HuggingFace inference endpoints
   - LM Studio (OpenAI-compatible base URL pattern)
 
-> Note: The repository historically referenced a 13-task template. The current active runner enforces the 10-task benchmark order.
+> Note: Earlier repository documentation and templates referenced a 13-task set. The current active runner and dataset in this repository enforce the 10-task benchmark order.
 
 ---
 
@@ -103,7 +103,7 @@ python src/evaluate.py \
   --no-confirm
 ```
 
-> Important: samples are currently executed sequentially in the evaluator loop.
+> Important: samples are currently executed sequentially in the evaluator loop. This is the present implementation behavior (parallelization is not active in the current runner path).
 
 ### 4.3 Full chain execution (stateful lifecycle)
 
@@ -274,7 +274,7 @@ python llm_judge.py \
 13. **Post-state verification** (`xo_client.py`, `eval_core.py`)  
     For stateful tasks, confirms expected infrastructure outcomes.
 14. **Dependent context injection** (`eval_core.py`)  
-    READ/UPDATE/DELETE chain tasks can consume context extracted from chain tfstate.
+    READ/UPDATE/DELETE chain tasks can consume context extracted from the preceding/shared chain workspace tfstate (for dependent IDs/UUIDs).
 
 ### Layer F — Result & Metrics Layer
 15. **Result record generation** (`json_generator.py`)  

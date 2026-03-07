@@ -42,8 +42,8 @@ def populate(csv_path='tasks/vm_provisioning_tasks.csv', refs_dir="tasks/referen
                 row['reference_hcl'] = hcls[tid]
             rows.append(row)
 
-    tmp_fd, tmp_path = tempfile.mkstemp(prefix=".populate_refs_", suffix=".csv", dir=os.path.dirname(csv_path) or ".")
-    os.close(tmp_fd)
+    with tempfile.NamedTemporaryFile(prefix=".populate_refs_", suffix=".csv", dir=os.path.dirname(csv_path) or ".", delete=False) as tmp_file:
+        tmp_path = tmp_file.name
     try:
         with open(tmp_path, 'w', newline='') as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames)

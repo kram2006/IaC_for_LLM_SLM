@@ -93,6 +93,7 @@ def compute_metrics_for_folder(dataset_folder, task_csv_path):
             return
 
         for row in reader:
+            # csv.DictReader stores overflow columns under a None key when rows are malformed.
             if None in row:
                 print("ERROR: Malformed CSV detected (unexpected extra columns).")
                 return

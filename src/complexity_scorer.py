@@ -103,8 +103,8 @@ def score_dataset(csv_path: str):
             rows.append(row)
             
         
-    tmp_fd, tmp_path = tempfile.mkstemp(prefix=".complexity_", suffix=".csv", dir=os.path.dirname(csv_path) or ".")
-    os.close(tmp_fd)
+    with tempfile.NamedTemporaryFile(prefix=".complexity_", suffix=".csv", dir=os.path.dirname(csv_path) or ".", delete=False) as tmp_file:
+        tmp_path = tmp_file.name
     try:
         with open(tmp_path, 'w', newline='') as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames)

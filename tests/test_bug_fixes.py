@@ -180,7 +180,7 @@ def test_dataset_csv_schema_integrity():
         rows = list(reader)
     assert rows, "Dataset must contain rows"
     for row in rows:
-        assert None not in row
+        assert None not in row.keys()
         assert re.fullmatch(r"[CRUD]\d\.\d", row["task_id"])
         assert (row.get("reference_hcl") or "").strip()
 

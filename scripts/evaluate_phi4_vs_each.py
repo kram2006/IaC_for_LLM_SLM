@@ -399,7 +399,7 @@ def main():
     if not COMPARISON_JSON.exists():
         print(f"[ERROR] comparison dataset not found: {COMPARISON_JSON}")
         print("Provide --comparison-json or --base-dir that contains comparison/comparison_dataset.json.")
-        return
+        return 1
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -445,7 +445,8 @@ def main():
                          m["ref_pass1"], m["ref_pass2"], m["ref_pass3"],
                          m["AvgIter"], m["OverallAvg"]])
     print(f"\n[OK] Summary CSV saved to {csv_path}")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

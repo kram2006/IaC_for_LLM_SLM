@@ -72,6 +72,7 @@ async def evaluate_task(task, config, client, output_dir, workspace_override=Non
     url = xo_cfg.get('url', 'ws://localhost:8080/api/')
     url = url.removesuffix('/api/').removesuffix('/api')
     system_prompt = system_prompt.replace("{XO_URL}", url)
+    system_prompt = system_prompt.replace("${XO_URL}", url)
     
     # Pre-compute TF_VARs for terraform subprocesses
     tf_env = {

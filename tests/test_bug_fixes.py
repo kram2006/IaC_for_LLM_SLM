@@ -5,6 +5,7 @@ import subprocess
 import csv
 import re
 import asyncio
+import shlex
 
 import pytest
 
@@ -35,7 +36,7 @@ def test_extract_terraform_code_keeps_non_empty_when_language_line_has_no_newlin
 def test_execute_command_timeout_returns_timeout_status():
     result = asyncio.run(
         execute_command(
-            f"{sys.executable} -c \"import time; time.sleep(0.2)\"",
+            f"{shlex.quote(sys.executable)} -c \"import time; time.sleep(0.2)\"",
             timeout=0.01,
             print_output=False
         )

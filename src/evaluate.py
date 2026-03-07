@@ -30,6 +30,8 @@ from models import GlobalConfig, ModelConfig
 MAX_CHAIN_SLUG_LENGTH = 50
 CHAIN_HASH_LENGTH = 16
 PLACEHOLDER_PATTERN = re.compile(r'^\$\{[^}]+\}$')
+DEFAULT_OPENROUTER_TIMEOUT = 300
+DEFAULT_OPENROUTER_MAX_RETRIES = 3
 
 def _validate_local_path(path_value, arg_name):
     normalized = os.path.normpath(path_value)
@@ -153,8 +155,14 @@ async def main():
             )
         base_url = model_config.get('base_url') or expanded_config.get('openrouter', {}).get('base_url', "https://openrouter.ai/api/v1/chat/completions")
         openrouter_cfg = expanded_config.get('openrouter', {})
-        timeout = _normalize_positive_int(model_config.get('timeout', openrouter_cfg.get('timeout', 300)), 300)
-        max_retries = _normalize_positive_int(model_config.get('max_retries', openrouter_cfg.get('max_retries', 3)), 3)
+        timeout = _normalize_positive_int(
+            model_config.get('timeout', openrouter_cfg.get('timeout', DEFAULT_OPENROUTER_TIMEOUT)),
+            DEFAULT_OPENROUTER_TIMEOUT
+        )
+        max_retries = _normalize_positive_int(
+            model_config.get('max_retries', openrouter_cfg.get('max_retries', DEFAULT_OPENROUTER_MAX_RETRIES)),
+            DEFAULT_OPENROUTER_MAX_RETRIES
+        )
         return OpenRouterClient(
             api_key=api_key,
             model_name=model_config['name'],
@@ -202,8 +210,8 @@ async def main():
         cleanup_workspaces = []
         xo_cfg = expanded_config.get('xenorchestra', {})
         tf_env = {
-            'TF_VAR_xo_username': xo_cfg.get('username', ''),
-            'TF_VAR_xo_password': xo_cfg.get('password', '')
+            'TF_VAR_xo_username': xo_cfg.get('username') or os.environ.get('XO_USERNAME', ''),
+            'TF_VAR_xo_password': xo_cfg.get('password') or os.environ.get('XO_PASSWORD', '')
         }
         
         has_previous_run = None

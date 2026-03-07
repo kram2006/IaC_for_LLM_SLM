@@ -185,15 +185,12 @@ async def evaluate_task(task, config, client, output_dir, workspace_override=Non
         {"role": "user", "content": user_prompt}
     ]
 
-    if initial_history is not None:
-        log_step("Starting fresh history with tfstate context (Chained Task memory optimization)")
-    else:
-        log_step("Starting fresh conversation history")
+    log_step("Starting fresh conversation history")
 
     print(f"\n{BOLD}{MAGENTA}" + "!"*30 + " TASK DATA " + "!"*30 + f"{RESET}")
     print(f"{BOLD}Task ID:{RESET} {task['task_id']}")
     if workspace_override:
-         print(f"{BOLD}Mode:{RESET}    CHAINED EXECUTION (Shared State)")
+         print(f"{BOLD}Mode:{RESET}    CHAINED EXECUTION (Per-Task Workspace, Shared State)")
     print(f"{BOLD}User Prompt:{RESET}\n{task['prompt']}")
     print(f"{BOLD}{MAGENTA}" + "!"*71 + f"{RESET}\n")
 
@@ -422,7 +419,10 @@ provider "xenorchestra" {{
         post_verification = {"actual_vm_count": 0, "vm_details": [], "note": "Skipped (plan-only mode)"}
     
     post_state_result = {'status': 'skipped', 'passed': None, 'errors': [], 'details': {'note': 'Not executed'}}
-    if workspace_override and not plan_only and success:
+    # Post-state verification applies to UPDATE and DELETE tasks that ran to a successful apply.
+    # The check is conditioned on chain_index > 0 (the task is a dependent chain step that acted
+    # on existing infrastructure) rather than workspace_override (which is now set for every task).
+    if chain_index > 0 and not plan_only and success:
         if task_category in ('UPDATE', 'DELETE'):
             post_state_result = verify_post_state(pre_verification.get('vm_details', []), post_verification.get('vm_details', []), task)
     

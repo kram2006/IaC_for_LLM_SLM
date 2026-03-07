@@ -2,6 +2,8 @@ import os
 import sys
 import tempfile
 import subprocess
+import csv
+import re
 
 import pytest
 
@@ -16,9 +18,11 @@ from spec_checker import DeleteValidation
 from spec_checker import CreateValidation, ReadValidation, UpdateValidation
 from compute_metrics import compute_metrics_for_folder, calculate_pass_at_k
 from evaluate import _validate_local_path, load_config
-from spec_checker import get_plan_json
+from spec_checker import get_plan_json, _extract_vm_resources
 from json_generator import redact_sensitive_text as redact_json_sensitive_text, check_compliance
 from llm_judge import parse_verdict
+from populate_references import populate
+from complexity_scorer import score_dataset
 
 
 def test_extract_terraform_code_keeps_non_empty_when_language_line_has_no_newline():
@@ -139,6 +143,91 @@ def test_json_generator_redacts_system_prompt_text():
 
 def test_parse_verdict_does_not_misclassify_incorrect_suffix():
     assert parse_verdict("Final assessment: incorrect") == "Incorrect"
+
+def test_llm_judge_cli_help_runs_standalone():
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    result = subprocess.run(
+        [sys.executable, "llm_judge.py", "--help"],
+        cwd=repo_root,
+        capture_output=True,
+        text=True
+    )
+    assert result.returncode == 0
+    assert "LLM-as-Judge" in result.stdout
+
+def test_extract_vm_resources_uses_before_name_for_delete_actions():
+    plan_json = {
+        "resource_changes": [
+            {
+                "type": "xenorchestra_vm",
+                "address": "xenorchestra_vm.vm",
+                "change": {
+                    "actions": ["delete"],
+                    "before": {"name_label": "legacy-vm"},
+                    "after": None,
+                },
+            }
+        ]
+    }
+    resources = _extract_vm_resources(plan_json)
+    assert resources[0]["action"] == "delete"
+    assert resources[0]["name_label"] == "legacy-vm"
+
+def test_dataset_csv_schema_integrity():
+    csv_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "tasks", "vm_provisioning_tasks.csv"))
+    with open(csv_path, newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        rows = list(reader)
+    assert rows, "Dataset must contain rows"
+    for row in rows:
+        assert None not in row.keys()
+        assert re.fullmatch(r"[CRUD]\d\.\d", row["task_id"])
+        assert (row.get("reference_hcl") or "").strip()
+
+def test_compute_metrics_shows_na_for_unavailable_k(capsys):
+    with tempfile.TemporaryDirectory() as tmpdir:
+        csv_path = os.path.join(tmpdir, "tasks.csv")
+        with open(csv_path, "w", encoding="utf-8") as f:
+            f.write("task_id,reference_hcl\nC1.1,resource \"x\" \"y\" {}\n")
+
+        result_path = os.path.join(tmpdir, "sample.json")
+        with open(result_path, "w", encoding="utf-8") as f:
+            f.write(
+                '{"task_id":"C1.1","llm_response":{"generated_code":"resource \\"x\\" \\"y\\" {}","time_to_generate_seconds":0},'
+                '"final_outcome":{"execution_successful":true,"total_iterations":1},"spec_accuracy":{"passed":true}}'
+            )
+
+        compute_metrics_for_folder(tmpdir, csv_path)
+        out = capsys.readouterr().out
+        assert "Pass@3 (Apply):     N/A" in out
+        assert "Pass@5 (Spec):      N/A" in out
+
+def test_populate_references_tolerates_legacy_overflow_columns(tmp_path):
+    csv_path = tmp_path / "tasks.csv"
+    refs_dir = tmp_path / "refs"
+    refs_dir.mkdir()
+    (refs_dir / "C1.1.tf").write_text('resource "xenorchestra_vm" "vm" {}', encoding="utf-8")
+    csv_path.write_text(
+        "task_id,reference_hcl,complexity_level\n"
+        "C1.1,,3,EXTRA\n",
+        encoding="utf-8"
+    )
+    populate(str(csv_path), str(refs_dir))
+    with open(csv_path, newline="", encoding="utf-8") as f:
+        row = next(csv.DictReader(f))
+    assert row["reference_hcl"].strip()
+
+def test_complexity_scorer_tolerates_legacy_overflow_columns(tmp_path):
+    csv_path = tmp_path / "tasks.csv"
+    csv_path.write_text(
+        "task_id,reference_hcl,complexity_loc,complexity_resources,complexity_interconnections,complexity_level\n"
+        "C1.1,\"resource \\\"xenorchestra_vm\\\" \\\"vm\\\" {}\",0,0,0,0,EXTRA\n",
+        encoding="utf-8"
+    )
+    score_dataset(str(csv_path))
+    with open(csv_path, newline="", encoding="utf-8") as f:
+        row = next(csv.DictReader(f))
+    assert row["complexity_level"] in {"1", "2", "3", "4", "5", "6"}
 
 
 def test_check_compliance_handles_zero_expected_value():

@@ -1,5 +1,5 @@
 task_id,category,prompt_type,prompt,resource_requirements,expected_resources,intent_spec_file,reference_hcl,complexity_loc,complexity_resources,complexity_interconnections,complexity_level
-C1.1,CREATE,vague,Create a VM,{},"[""xenorchestra_vm""]",,,"terraform {
+C1.1,CREATE,vague,Create a VM,{},"[""xenorchestra_vm""]",,"terraform {
   required_providers {
     xenorchestra = {
       source  = ""terra-farm/xenorchestra""
@@ -50,8 +50,8 @@ resource ""xenorchestra_vm"" ""vm"" {
   network {
     network_id = data.xenorchestra_network.net.id
   }
-}",44,5,6,4
-C1.2,CREATE,little_context,Create an Ubuntu VM with 2GB RAM,"{""memory_max_bytes"": 2147483648}","[""xenorchestra_vm""]",,,"terraform {
+}",44,5,4,4
+C1.2,CREATE,little_context,Create an Ubuntu VM with 2GB RAM,"{""memory_max_bytes"": 2147483648}","[""xenorchestra_vm""]",,"terraform {
   required_providers {
     xenorchestra = {
       source  = ""terra-farm/xenorchestra""
@@ -108,8 +108,8 @@ resource ""xenorchestra_vm"" ""vm"" {
   }
 
   tags = [""iso-install"", ""ubuntu-22.04""]
-}",48,5,6,4
-C1.3,CREATE,detailed,"Create Ubuntu 22.04 VM named 'app-01' with 2 vCPU, 4GB RAM, 50GB disk on storage 'Local storage', network 'Pool-wide network associated with eth0' with DHCP","{""memory_max_bytes"": 4294967296, ""cpus"": 2, ""name"": ""app-01"", ""size_bytes"": 53687091200}","[""xenorchestra_vm""]",,,"terraform {
+}",48,5,4,4
+C1.3,CREATE,detailed,"Create Ubuntu 22.04 VM named 'app-01' with 2 vCPU, 4GB RAM, 50GB disk on storage 'Local storage', network 'Pool-wide network associated with eth0' with DHCP","{""memory_max_bytes"": 4294967296, ""cpus"": 2, ""name"": ""app-01"", ""size_bytes"": 53687091200}","[""xenorchestra_vm""]",,"terraform {
   required_providers {
     xenorchestra = {
       source  = ""terra-farm/xenorchestra""
@@ -166,8 +166,8 @@ resource ""xenorchestra_vm"" ""vm"" {
   }
 
   tags = [""iso-install"", ""ubuntu-22.04""]
-}",48,5,6,4
-C2.2,CREATE,little_context,Create 3 Ubuntu VMs with 2GB RAM each,"{""memory_max_bytes"": 6442450944, ""count"": 3}","[""xenorchestra_vm""]",,,"terraform {
+}",48,5,4,4
+C2.2,CREATE,little_context,Create 3 Ubuntu VMs with 2GB RAM each,"{""memory_max_bytes"": 6442450944, ""count"": 3}","[""xenorchestra_vm""]",,"terraform {
   required_providers {
     xenorchestra = {
       source  = ""terra-farm/xenorchestra""
@@ -219,8 +219,8 @@ resource ""xenorchestra_vm"" ""vm"" {
   network {
     network_id = data.xenorchestra_network.net.id
   }
-}",45,5,6,4
-C2.3,CREATE,detailed,"Create 3 Ubuntu 22.04 VMs named 'web-01', 'web-02', 'web-03' with 2 vCPU, 4GB RAM, 50GB disk each on storage 'Local storage', network 'Pool-wide network associated with eth0' with DHCP","{""memory_max_bytes"": 12884901888, ""count"": 3, ""names"": [""web-01"", ""web-02"", ""web-03""]}","[""xenorchestra_vm""]",,,"terraform {
+}",45,5,4,4
+C2.3,CREATE,detailed,"Create 3 Ubuntu 22.04 VMs named 'web-01', 'web-02', 'web-03' with 2 vCPU, 4GB RAM, 50GB disk each on storage 'Local storage', network 'Pool-wide network associated with eth0' with DHCP","{""memory_max_bytes"": 12884901888, ""count"": 3, ""names"": [""web-01"", ""web-02"", ""web-03""]}","[""xenorchestra_vm""]",,"terraform {
   required_providers {
     xenorchestra = {
       source  = ""terra-farm/xenorchestra""
@@ -282,8 +282,8 @@ resource ""xenorchestra_vm"" ""vm"" {
   }
 
   tags = [""iso-install"", ""ubuntu-22.04""]
-}",52,5,9,5
-R1.2,READ,little_context,List all VMs with their RAM allocation,{},"[""data.xenorchestra_vms""]",,,"terraform {
+}",52,5,5,5
+R1.2,READ,little_context,List all VMs with their RAM allocation,{},"[""data.xenorchestra_vms""]",,"terraform {
   required_providers {
     xenorchestra = {
       source  = ""terra-farm/xenorchestra""
@@ -309,8 +309,8 @@ data ""xenorchestra_vms"" ""all_vms"" {
 
 output ""vm_memory"" {
   value = { for vm in data.xenorchestra_vms.all_vms.vms : vm.name_label => vm.memory_max }
-}",23,2,2,3
-U1.2,UPDATE,little_context,Increase RAM of app-01 to 6GB,"{""memory_max_bytes"": 6442450944, ""target_vm"": ""app-01"", ""op"": ""update""}","[""xenorchestra_vm""]",,,"terraform {
+}",23,2,3,3
+U1.2,UPDATE,little_context,Increase RAM of app-01 to 6GB,"{""memory_max_bytes"": 6442450944, ""target_vm"": ""app-01"", ""op"": ""update""}","[""xenorchestra_vm""]",,"terraform {
   required_providers {
     xenorchestra = {
       source  = ""terra-farm/xenorchestra""
@@ -361,8 +361,8 @@ resource ""xenorchestra_vm"" ""vm"" {
   network {
     network_id = data.xenorchestra_network.net.id
   }
-}",44,5,6,4
-D1.2,DELETE,little_context,Remove app-01 from my infrastructure,"{""target_vm"": ""app-01"", ""op"": ""delete""}",[],,,"terraform {
+}",44,5,4,4
+D1.2,DELETE,little_context,Remove app-01 from my infrastructure,"{""target_vm"": ""app-01"", ""op"": ""delete""}",[],,"terraform {
   required_providers {
     xenorchestra = {
       source  = ""terra-farm/xenorchestra""
@@ -380,8 +380,8 @@ provider ""xenorchestra"" {
 
 data ""xenorchestra_pool"" ""pool"" {
   name_label = ""DAO-Agentic-Infra""
-}",17,1,0,2
-D2.2,DELETE,little_context,Remove web-02 and web-03 from my infrastructure,"{""target_vm"": [""web-02"", ""web-03""], ""op"": ""delete""}",[],,,"terraform {
+}",17,1,2,2
+D2.2,DELETE,little_context,Remove web-02 and web-03 from my infrastructure,"{""target_vm"": [""web-02"", ""web-03""], ""op"": ""delete""}",[],,"terraform {
   required_providers {
     xenorchestra = {
       source  = ""terra-farm/xenorchestra""
@@ -432,8 +432,8 @@ resource ""xenorchestra_vm"" ""vm"" {
   network {
     network_id = data.xenorchestra_network.net.id
   }
-}",44,5,6,4
-C5.2,CREATE,over_provisioning,Create 10 Ubuntu VMs with 3GB RAM each,"{""memory_max_bytes"": 32212254720, ""count"": 10, ""expected_error"": ""resource_exhaustion""}","[""xenorchestra_vm""]",,,"terraform {
+}",44,5,4,4
+C5.2,CREATE,over_provisioning,Create 10 Ubuntu VMs with 3GB RAM each,"{""memory_max_bytes"": 32212254720, ""count"": 10, ""expected_error"": ""resource_exhaustion""}","[""xenorchestra_vm""]",,"terraform {
   required_providers {
     xenorchestra = {
       source  = ""terra-farm/xenorchestra""
@@ -485,4 +485,4 @@ resource ""xenorchestra_vm"" ""vm"" {
   network {
     network_id = data.xenorchestra_network.net.id
   }
-}",45,5,6,4
+}",45,5,4,4

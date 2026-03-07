@@ -2,6 +2,7 @@ import os
 import json
 import glob
 import re
+import csv
 from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
 
 try:
@@ -77,16 +78,29 @@ def calculate_pass_at_k(n, c, k):
     return 1.0 - comb(n - c, k) / comb(n, k)
 
 def compute_metrics_for_folder(dataset_folder, task_csv_path):
-    import pandas as pd
     lockfile = os.path.join(dataset_folder, ".evaluation_in_progress")
     if os.path.exists(lockfile):
         print(f"ERROR: Evaluation still running in {dataset_folder}. Wait for completion.")
         return
 
-    df = pd.read_csv(task_csv_path)
     ref_map = {}
-    if 'reference_hcl' in df.columns:
-        ref_map = dict(zip(df['task_id'], df['reference_hcl']))
+    with open(task_csv_path, newline='', encoding='utf-8') as csv_file:
+        reader = csv.DictReader(csv_file)
+        required_columns = {'task_id', 'reference_hcl'}
+        missing_columns = required_columns - set(reader.fieldnames or [])
+        if missing_columns:
+            print(f"ERROR: Missing required columns in CSV: {sorted(missing_columns)}")
+            return
+
+        for row in reader:
+            # csv.DictReader stores overflow columns under a None key when rows are malformed.
+            if None in row:
+                print("ERROR: Malformed CSV detected (unexpected extra columns).")
+                return
+            task_id = (row.get('task_id') or '').strip()
+            if not task_id:
+                continue
+            ref_map[task_id] = row.get('reference_hcl') or ''
 
     results = []
     
@@ -167,8 +181,8 @@ def compute_metrics_for_folder(dataset_folder, task_csv_path):
             pass_at_k_apply[k] = total_prob_apply / tasks_with_k_samples
             pass_at_k_spec[k] = total_prob_spec / tasks_with_k_samples
         else:
-            pass_at_k_apply[k] = 0.0
-            pass_at_k_spec[k] = 0.0
+            pass_at_k_apply[k] = None
+            pass_at_k_spec[k] = None
 
     total_samples = len(results)
     avg_iter   = sum(r['iterations'] for r in results) / total_samples if total_samples > 0 else 0
@@ -189,10 +203,16 @@ def compute_metrics_for_folder(dataset_folder, task_csv_path):
     # Display unbiased Pass@k metrics
     for k in k_values:
         if k in pass_at_k_apply:
-            print(f"  Pass@{k} (Apply):     {pass_at_k_apply[k]:.1%}")
+            if pass_at_k_apply[k] is None:
+                print(f"  Pass@{k} (Apply):     N/A")
+            else:
+                print(f"  Pass@{k} (Apply):     {pass_at_k_apply[k]:.1%}")
     for k in k_values:
         if k in pass_at_k_spec:
-            print(f"  Pass@{k} (Spec):      {pass_at_k_spec[k]:.1%}")
+            if pass_at_k_spec[k] is None:
+                print(f"  Pass@{k} (Spec):      N/A")
+            else:
+                print(f"  Pass@{k} (Spec):      {pass_at_k_spec[k]:.1%}")
     
     print(f"  Avg Iterations:     {avg_iter:.2f}")
     print(f"  Avg Gen Time (s):   {avg_time:.1f}")

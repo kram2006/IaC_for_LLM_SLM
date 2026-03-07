@@ -272,7 +272,7 @@ provider "xenorchestra" {{
             json.dump(redact_messages_for_logging(messages), f, indent=2)
 
         log_step("Running terraform init")
-        init_res = await execute_command("terraform init", cwd=workspace_dir, env=tf_env)
+        init_res = await execute_command("terraform init", cwd=workspace_dir, timeout=180, env=tf_env)
         save_log(os.path.join(task_log_dir, f"init_iter{iteration}.log"), init_res.get('stdout', '') + init_res.get('stderr', ''))
         if init_res['exit_code'] != 0:
             error_history.append(f"Init failed:\n{init_res.get('stderr', '')}")
@@ -280,7 +280,7 @@ provider "xenorchestra" {{
             continue
 
         log_step("Running terraform validate")
-        val_res = await execute_command("terraform validate", cwd=workspace_dir, env=tf_env)
+        val_res = await execute_command("terraform validate", cwd=workspace_dir, timeout=120, env=tf_env)
         save_log(os.path.join(task_log_dir, f"validate_iter{iteration}.log"), val_res.get('stdout', '') + val_res.get('stderr', ''))
         if val_res['exit_code'] != 0:
             error_history.append(f"Validation failed:\n{val_res.get('stderr', '')}")
@@ -288,7 +288,7 @@ provider "xenorchestra" {{
             continue
 
         log_step("Running terraform plan")
-        plan_res = await execute_command("terraform plan -out=tfplan", cwd=workspace_dir, env=tf_env)
+        plan_res = await execute_command("terraform plan -out=tfplan", cwd=workspace_dir, timeout=300, env=tf_env)
         save_log(os.path.join(task_log_dir, f"plan_iter{iteration}.log"), plan_res.get('stdout', '') + plan_res.get('stderr', ''))
         
         if expected_error == 'resource_exhaustion':

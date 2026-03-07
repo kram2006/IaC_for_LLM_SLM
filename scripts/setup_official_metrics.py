@@ -42,7 +42,8 @@ def _is_within_directory(base_dir, target_path):
         return False
 
 def safe_extract_tar(tar, path):
-    for member in tar.getmembers():
+    members = tar.getmembers()
+    for member in members:
         member_path = Path(member.name)
         if member_path.is_absolute() or ".." in member_path.parts:
             raise ValueError(f"Blocked unsafe tar path: {member.name}")
@@ -56,11 +57,12 @@ def safe_extract_tar(tar, path):
         if member.ischr() or member.isblk() or member.isfifo() or member.isdev():
             raise ValueError(f"Blocked special tar entry: {member.name}")
 
-    for member in tar.getmembers():
+    for member in members:
         tar.extract(member, path=path, filter="data")
 
 def safe_extract_zip(zip_ref, path):
-    for member in zip_ref.infolist():
+    members = zip_ref.infolist()
+    for member in members:
         member_path = Path(member.filename)
         if member_path.is_absolute() or ".." in member_path.parts:
             raise ValueError(f"Blocked unsafe zip path: {member.filename}")
@@ -69,11 +71,11 @@ def safe_extract_zip(zip_ref, path):
         if not _is_within_directory(path, target_path):
             raise ValueError(f"Blocked unsafe zip path: {member.filename}")
 
-        member_mode = (member.external_attr >> 16) & 0o170000
+        member_mode = stat.S_IFMT(member.external_attr >> 16)
         if member_mode == stat.S_IFLNK:
             raise ValueError(f"Blocked zip link entry: {member.filename}")
 
-    for member in zip_ref.infolist():
+    for member in members:
         zip_ref.extract(member, path)
 
 def setup_meteor():

@@ -26,6 +26,7 @@ from evaluate import (
     _next_chain_index_after_result,
     _order_fixed_benchmark_tasks,
     _preserve_tfstate_snapshot,
+    _copy_chain_tfstate,
     load_config,
 )
 from eval_core import _extract_infra_context_from_tfstate, _resolve_tfstate_context_path, _verify_vms_with_retry
@@ -676,14 +677,101 @@ def test_benchmark_mode_independent_task_always_destroys_after_completion():
 
 
 def test_benchmark_mode_chain_group_destroys_workspace_after_completion():
-    """run_chain_group must call cleanup_workspace_if_state_exists on the shared workspace."""
+    """run_chain_group must call cleanup_workspace_if_state_exists on the last task workspace."""
     evaluate_source = Path(SRC_DIR, "evaluate.py").read_text(encoding="utf-8")
-    # Verify the cleanup call appears inside run_chain_group (after the while loop).
-    assert "await cleanup_workspace_if_state_exists(shared_chain_workspace)" in evaluate_source
+    # Cleanup uses chain_last_task_workspace (the per-task workspace of the last executed step).
+    assert "await cleanup_workspace_if_state_exists(chain_last_task_workspace)" in evaluate_source
 
 
 def test_explicit_chain_mode_destroys_workspace_after_chain_completes():
-    """The --chain explicit mode must destroy the chain workspace after all tasks finish."""
+    """The --chain explicit mode must destroy the last task workspace after all tasks finish."""
     evaluate_source = Path(SRC_DIR, "evaluate.py").read_text(encoding="utf-8")
-    # The cleanup call for --chain mode uses workspace_dir (not shared_chain_workspace).
-    assert "await cleanup_workspace_if_state_exists(workspace_dir)" in evaluate_source
+    # Both benchmark and explicit-chain modes use chain_last_task_workspace for cleanup.
+    assert "await cleanup_workspace_if_state_exists(chain_last_task_workspace)" in evaluate_source
+
+
+# ---------------------------------------------------------------------------
+# _copy_chain_tfstate helper tests
+# ---------------------------------------------------------------------------
+
+def test_copy_chain_tfstate_copies_state_file(tmp_path):
+    """_copy_chain_tfstate must copy terraform.tfstate from src workspace to dst workspace."""
+    src_ws = tmp_path / "src_ws"
+    dst_ws = tmp_path / "dst_ws"
+    src_ws.mkdir()
+    dst_ws.mkdir()
+    state_content = '{"resources":[{"type":"xenorchestra_vm","instances":[{"attributes":{"id":"abc"}}]}]}'
+    (src_ws / "terraform.tfstate").write_text(state_content, encoding="utf-8")
+
+    _copy_chain_tfstate(str(src_ws), str(dst_ws))
+
+    assert (dst_ws / "terraform.tfstate").exists()
+    assert (dst_ws / "terraform.tfstate").read_text(encoding="utf-8") == state_content
+
+
+def test_copy_chain_tfstate_skips_when_source_absent(tmp_path):
+    """_copy_chain_tfstate must be a no-op when the source state file does not exist."""
+    src_ws = tmp_path / "src_ws"
+    dst_ws = tmp_path / "dst_ws"
+    src_ws.mkdir()
+    dst_ws.mkdir()
+
+    _copy_chain_tfstate(str(src_ws), str(dst_ws))
+
+    assert not (dst_ws / "terraform.tfstate").exists()
+
+
+def test_copy_chain_tfstate_skips_when_source_too_small(tmp_path):
+    """_copy_chain_tfstate must ignore state files that are ≤10 bytes (empty/stub)."""
+    src_ws = tmp_path / "src_ws"
+    dst_ws = tmp_path / "dst_ws"
+    src_ws.mkdir()
+    dst_ws.mkdir()
+    (src_ws / "terraform.tfstate").write_text("{}", encoding="utf-8")  # 2 bytes
+
+    _copy_chain_tfstate(str(src_ws), str(dst_ws))
+
+    assert not (dst_ws / "terraform.tfstate").exists()
+
+
+# ---------------------------------------------------------------------------
+# Per-task workspace and state-passing contract tests
+# ---------------------------------------------------------------------------
+
+def test_chain_tasks_use_per_task_workspaces():
+    """Each chain task must have its own workspace directory (not a single shared dir)."""
+    evaluate_source = Path(SRC_DIR, "evaluate.py").read_text(encoding="utf-8")
+    # Both modes must contain the per-task directory pattern (task_id slug in the path).
+    assert "chain_{chain_slug}_{chain_task_id_slug}_p{pass_num}" in evaluate_source
+    assert "chain_{chain_slug}_{task_id_slug}_p{pass_num}" in evaluate_source
+    # The old shared workspace variable must not be used as an assignment target or in
+    # function calls (ensure it's not in any active code path).
+    import re as _re
+    # Match assignment or function-call usage — not bare comments/docstrings.
+    assert not _re.search(r'\bshared_chain_workspace\s*=', evaluate_source), \
+        "shared_chain_workspace must not be assigned in evaluate.py"
+    assert "cleanup_workspace_if_state_exists(shared_chain_workspace)" not in evaluate_source
+
+
+def test_chain_state_passes_forward_only_on_success():
+    """chain_state_workspace must only be updated after a successful non-READ task."""
+    evaluate_source = Path(SRC_DIR, "evaluate.py").read_text(encoding="utf-8")
+    # The state source advances only when success AND not READ.
+    assert 'chain_result.get("success") and chain_task_category != \'READ\'' in evaluate_source
+    assert 'task_result.get("success") and task_category != \'READ\'' in evaluate_source
+
+
+def test_chain_state_fallback_uses_copy_helper():
+    """_copy_chain_tfstate must be called to pass state into each chain task."""
+    evaluate_source = Path(SRC_DIR, "evaluate.py").read_text(encoding="utf-8")
+    assert "_copy_chain_tfstate(chain_state_workspace, per_task_workspace)" in evaluate_source
+    assert "_copy_chain_tfstate(chain_state_workspace, task_workspace)" in evaluate_source
+
+
+def test_chain_cleanup_uses_last_task_workspace():
+    """Cleanup must use chain_last_task_workspace, not any earlier stale workspace."""
+    evaluate_source = Path(SRC_DIR, "evaluate.py").read_text(encoding="utf-8")
+    assert "await cleanup_workspace_if_state_exists(chain_last_task_workspace)" in evaluate_source
+    # Old variables must not appear in cleanup positions.
+    assert "await cleanup_workspace_if_state_exists(workspace_dir)" not in evaluate_source
+    assert "await cleanup_workspace_if_state_exists(shared_chain_workspace)" not in evaluate_source

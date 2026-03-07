@@ -1,5 +1,6 @@
 import os
 import sys
+import shutil
 import logging
 import argparse
 import hashlib
@@ -32,6 +33,9 @@ from models import GlobalConfig, ModelConfig
 
 MAX_CHAIN_SLUG_LENGTH = 50
 CHAIN_HASH_LENGTH = 16
+# Minimum number of bytes a terraform.tfstate file must contain to be considered
+# non-empty and worth copying or snapshotting (guards against zero-byte stubs).
+MIN_TFSTATE_SIZE_BYTES = 10
 PLACEHOLDER_PATTERN = re.compile(r'^\$\{[^}]+\}$')
 DEFAULT_OPENROUTER_TIMEOUT = 300
 DEFAULT_OPENROUTER_MAX_RETRIES = 3
@@ -122,6 +126,21 @@ def _preserve_tfstate_snapshot(workspace_dir, snapshot_label=None):
 
     log_step(f"Saved pre-destroy terraform state snapshot: {snapshot_path}")
     return snapshot_path
+
+def _copy_chain_tfstate(src_workspace, dst_workspace):
+    """Copy terraform.tfstate from a previous chain task workspace into the next task's workspace.
+
+    This is how Terraform state flows through a chain: each task starts with the state
+    produced by the last successful task, so Terraform can see and act on existing resources
+    (e.g. UPDATE or DELETE the VM that CREATE built).  If the source state file is absent or
+    empty the copy is silently skipped and the destination task starts with a clean slate.
+    """
+    src = os.path.join(src_workspace, "terraform.tfstate")
+    if not os.path.exists(src) or os.path.getsize(src) <= MIN_TFSTATE_SIZE_BYTES:
+        return
+    dst = os.path.join(dst_workspace, "terraform.tfstate")
+    shutil.copy2(src, dst)
+    log_step(f"Copied chain terraform state: {src} -> {dst}")
 
 def load_config(config_path):
     import re
@@ -336,54 +355,78 @@ async def main():
                 log_error(f"Cleanup failed for {cleanup_workspace}: {destroy_res.get('stderr', '')}")
 
         if args.chain:
-            # Chained mode: Shared workspace for all tasks in this sample.
-            # Tasks within the chain share state; workspace is destroyed after the chain completes.
+            # Chained mode: each task runs in its own workspace directory.
+            # The terraform.tfstate is passed forward explicitly from the last successful
+            # task so Terraform can see existing resources (e.g. UPDATE / DELETE the VM
+            # that a previous CREATE step provisioned).
+            #
+            # State fallback: if task N fails, task N+1 (the cleanup/fallback task)
+            # receives the state from the last SUCCESSFUL task, not from the failed one.
+            # Example: D1.2 receives C1.3's state when U1.2 fails.
             chain_ids = [t['task_id'].replace('.', '_') for t in tasks]
             chain_slug = "_".join(chain_ids)
             if len(chain_slug) > MAX_CHAIN_SLUG_LENGTH:
                 chain_slug = hashlib.sha256(chain_slug.encode("utf-8")).hexdigest()[:CHAIN_HASH_LENGTH]
-            workspace_dir = os.path.join(
-                args.output_dir,
-                "terraform_code",
-                effective_folder_name,
-                f"chain_{chain_slug}_p{pass_num}"
-            )
-            os.makedirs(workspace_dir, exist_ok=True)
-            cleanup_workspaces.append(workspace_dir)
+
+            chain_state_workspace = None   # workspace holding the last successfully applied state
+            chain_last_task_workspace = None  # last executed workspace, used for final cleanup
 
             i = 0
             while i < len(tasks):
                 task_spec = tasks[i]
+                task_id_slug = task_spec['task_id'].replace('.', '_')
                 task_category = task_spec.get('category', '').strip().upper()
                 task_plan_only = args.plan_only or (task_category == 'READ')
-                task_workspace = workspace_dir
-                # Keep dependent-context tfstate sourced from shared chain workspace
-                # even when READ executes in an isolated read workspace.
-                state_workspace_for_dependent_context = workspace_dir
+
+                # Per-task workspace — each chain step writes its own main.tf here.
+                task_workspace = os.path.join(
+                    args.output_dir,
+                    "terraform_code",
+                    effective_folder_name,
+                    f"chain_{chain_slug}_{task_id_slug}_p{pass_num}"
+                )
+                os.makedirs(task_workspace, exist_ok=True)
+                cleanup_workspaces.append(task_workspace)
+                chain_last_task_workspace = task_workspace
+
+                # Pass state from the last successful task into this task's workspace so
+                # Terraform can plan updates/deletes against the existing infrastructure.
+                if chain_state_workspace:
+                    _copy_chain_tfstate(chain_state_workspace, task_workspace)
+
+                # READ tasks execute in an isolated read workspace so they do not write
+                # back into the chain state; the dependent-context tfstate is sourced from
+                # task_workspace (where the state was copied to above).
+                actual_workspace = task_workspace
                 if task_category == 'READ':
-                    task_workspace = os.path.join(
+                    actual_workspace = os.path.join(
                         args.output_dir,
                         "terraform_code",
                         effective_folder_name,
                         f"chain_{chain_slug}_read_{task_spec['task_id'].replace('.', '_')}_p{pass_num}"
                     )
-                    os.makedirs(task_workspace, exist_ok=True)
-                    cleanup_workspaces.append(task_workspace)
+                    os.makedirs(actual_workspace, exist_ok=True)
+                    cleanup_workspaces.append(actual_workspace)
 
                 task_result = await evaluate_task(
                     task=task_spec,
                     config=expanded_config,
                     client=client,
                     output_dir=args.output_dir,
-                    workspace_override=task_workspace,
+                    workspace_override=actual_workspace,
                     plan_only=task_plan_only,
                     sample_num=pass_num,
                     chain_index=i,
-                    state_workspace_override=state_workspace_for_dependent_context,
+                    state_workspace_override=task_workspace,
                     no_confirm=args.no_confirm,
                     enhance_strat=args.enhance_strat,
                     return_result=True
                 )
+                # Advance the authoritative chain state only when the task successfully
+                # applied (READ tasks are plan-only and never modify the shared state).
+                if task_result.get("success") and task_category != 'READ':
+                    chain_state_workspace = task_workspace
+
                 next_index = _next_chain_index_after_result(tasks, i, task_result.get("success", False))
                 if next_index is None:
                     break
@@ -394,9 +437,10 @@ async def main():
                     )
                 i = next_index
 
-            # Destroy chain workspace VMs after the entire chain completes and artifacts are saved.
-            if not args.plan_only:
-                await cleanup_workspace_if_state_exists(workspace_dir)
+            # Destroy infrastructure using the last executed task's workspace, which holds
+            # the most current terraform.tfstate for the chain.
+            if not args.plan_only and chain_last_task_workspace:
+                await cleanup_workspace_if_state_exists(chain_last_task_workspace)
         else:
             # Sequential benchmark mode: tasks run one after another in the fixed order.
             # Each independent task starts with a fresh workspace (no shared state with other tasks).
@@ -441,23 +485,44 @@ async def main():
                 chain_slug = "_".join(chain_task_names)
                 if len(chain_slug) > MAX_CHAIN_SLUG_LENGTH:
                     chain_slug = hashlib.sha256(chain_slug.encode("utf-8")).hexdigest()[:CHAIN_HASH_LENGTH]
-                shared_chain_workspace = os.path.join(
-                    args.output_dir,
-                    "terraform_code",
-                    effective_folder_name,
-                    f"chain_{chain_slug}_p{pass_num}"
-                )
-                os.makedirs(shared_chain_workspace, exist_ok=True)
-                cleanup_workspaces.append(shared_chain_workspace)
+
+                # Each task in the chain runs in its own workspace directory.
+                # The terraform.tfstate is passed forward explicitly from the last successful
+                # task so Terraform can see existing resources (UPDATE / DELETE the VM that
+                # a previous CREATE step provisioned).
+                #
+                # State fallback: if task N fails, the fallback cleanup task receives the
+                # state from the last SUCCESSFUL task, not from the failed one.
+                # Example: D1.2 receives C1.3's state when U1.2 fails.
+                chain_state_workspace = None   # workspace holding the last successfully applied state
+                chain_last_task_workspace = None  # last executed workspace, used for final cleanup
+
                 i = 0
                 while i < len(chain_tasks):
                     chain_task_spec = chain_tasks[i]
+                    chain_task_id_slug = chain_task_spec.get('task_id', '').replace('.', '_')
                     chain_task_category = chain_task_spec.get('category', '').strip().upper()
                     chain_task_plan_only = args.plan_only or (chain_task_category == 'READ')
-                    chain_task_workspace = shared_chain_workspace
-                    # Keep dependent-context tfstate sourced from shared chain workspace
-                    # even when READ executes in an isolated read workspace.
-                    chain_state_workspace_for_dependent_context = shared_chain_workspace
+
+                    # Per-task workspace — each chain step writes its own main.tf here.
+                    per_task_workspace = os.path.join(
+                        args.output_dir,
+                        "terraform_code",
+                        effective_folder_name,
+                        f"chain_{chain_slug}_{chain_task_id_slug}_p{pass_num}"
+                    )
+                    os.makedirs(per_task_workspace, exist_ok=True)
+                    cleanup_workspaces.append(per_task_workspace)
+                    chain_last_task_workspace = per_task_workspace
+
+                    # Pass state from the last successful task into this task's workspace.
+                    if chain_state_workspace:
+                        _copy_chain_tfstate(chain_state_workspace, per_task_workspace)
+
+                    # READ tasks execute in an isolated read workspace so they do not write
+                    # back into the chain state; dependent-context tfstate is sourced from
+                    # per_task_workspace (where the state was copied to above).
+                    chain_task_workspace = per_task_workspace
                     if chain_task_category == 'READ':
                         chain_task_workspace = os.path.join(
                             args.output_dir,
@@ -467,6 +532,7 @@ async def main():
                         )
                         os.makedirs(chain_task_workspace, exist_ok=True)
                         cleanup_workspaces.append(chain_task_workspace)
+
                     chain_result = await evaluate_task(
                         task=chain_task_spec,
                         config=expanded_config,
@@ -476,19 +542,25 @@ async def main():
                         plan_only=chain_task_plan_only,
                         sample_num=pass_num,
                         chain_index=i,
-                        state_workspace_override=chain_state_workspace_for_dependent_context,
+                        state_workspace_override=per_task_workspace,
                         no_confirm=args.no_confirm,
                         enhance_strat=args.enhance_strat,
                         return_result=True
                     )
+                    # Advance the authoritative chain state only when the task successfully
+                    # applied (READ tasks are plan-only and never modify the shared state).
+                    if chain_result.get("success") and chain_task_category != 'READ':
+                        chain_state_workspace = per_task_workspace
+
                     next_index = _next_chain_index_after_result(chain_tasks, i, chain_result.get("success", False))
                     if next_index is None:
                         break
                     i = next_index
-                # All chain tasks have completed and written their artifacts. Destroy the shared
-                # workspace VMs before proceeding to the next task/group.
-                if not args.plan_only:
-                    await cleanup_workspace_if_state_exists(shared_chain_workspace)
+
+                # Destroy infrastructure using the last executed task's workspace, which
+                # holds the most current terraform.tfstate for the chain.
+                if not args.plan_only and chain_last_task_workspace:
+                    await cleanup_workspace_if_state_exists(chain_last_task_workspace)
 
             # Execute tasks and chain groups sequentially in fixed benchmark order.
             # Independent tasks have no shared state with each other or with chain groups.

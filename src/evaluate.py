@@ -336,7 +336,8 @@ async def main():
                 log_error(f"Cleanup failed for {cleanup_workspace}: {destroy_res.get('stderr', '')}")
 
         if args.chain:
-            # Chained mode: Shared workspace for all tasks in this sample
+            # Chained mode: Shared workspace for all tasks in this sample.
+            # Tasks within the chain share state; workspace is destroyed after the chain completes.
             chain_ids = [t['task_id'].replace('.', '_') for t in tasks]
             chain_slug = "_".join(chain_ids)
             if len(chain_slug) > MAX_CHAIN_SLUG_LENGTH:
@@ -349,7 +350,7 @@ async def main():
             )
             os.makedirs(workspace_dir, exist_ok=True)
             cleanup_workspaces.append(workspace_dir)
-            
+
             i = 0
             while i < len(tasks):
                 task_spec = tasks[i]
@@ -392,9 +393,16 @@ async def main():
                         f"Task {task_spec.get('task_id')} failed; skipping intermediate chain tasks and continuing with cleanup task {tasks[next_index].get('task_id')}"
                     )
                 i = next_index
+
+            # Destroy chain workspace VMs after the entire chain completes and artifacts are saved.
+            if not args.plan_only:
+                await cleanup_workspace_if_state_exists(workspace_dir)
         else:
-            # Standalone / benchmark mode: independent tasks and chain groups run concurrently.
-            # Within each chain group, tasks remain sequential to preserve stateful dependencies.
+            # Sequential benchmark mode: tasks run one after another in the fixed order.
+            # Each independent task starts with a fresh workspace (no shared state with other tasks).
+            # Each chain group shares a workspace internally; that workspace is destroyed after the
+            # group completes. All evaluation artifacts (dataset JSON, logs, terraform files) are
+            # written by evaluate_task/eval_core before cleanup runs.
             task_lookup = {str(t.get("task_id", "")).strip().lower(): t for t in tasks}
 
             async def run_independent_task(task_spec):
@@ -420,8 +428,9 @@ async def main():
                     enhance_strat=args.enhance_strat,
                     return_result=False
                 )
-                # evaluate_task writes dataset JSON before returning; cleanup must happen strictly after that.
-                if (not args.plan_only) and task_spec.get("task_id", "").strip().lower() in INDEPENDENT_TASK_IDS:
+                # evaluate_task writes all artifacts (dataset JSON, logs, terraform files) before
+                # returning. Destroy VMs now so the next task starts on clean infrastructure.
+                if not args.plan_only:
                     await cleanup_workspace_if_state_exists(sample_workspace)
 
             async def run_chain_group(chain_group_ids):
@@ -476,9 +485,13 @@ async def main():
                     if next_index is None:
                         break
                     i = next_index
+                # All chain tasks have completed and written their artifacts. Destroy the shared
+                # workspace VMs before proceeding to the next task/group.
+                if not args.plan_only:
+                    await cleanup_workspace_if_state_exists(shared_chain_workspace)
 
-            # Build one coroutine per independent task and one per chain group, then run all concurrently.
-            all_coroutines = []
+            # Execute tasks and chain groups sequentially in fixed benchmark order.
+            # Independent tasks have no shared state with each other or with chain groups.
             seen_chain_ids = set()
             for task_spec in tasks:
                 task_id_normalized = str(task_spec.get("task_id", "")).strip().lower()
@@ -486,23 +499,11 @@ async def main():
                     continue
                 chain_group = PARTIAL_CHAIN_GROUPS_BY_START.get(task_id_normalized)
                 if chain_group:
-                    all_coroutines.append(run_chain_group(chain_group))
+                    await run_chain_group(chain_group)
                     seen_chain_ids.update(chain_group)
                 else:
-                    all_coroutines.append(run_independent_task(task_spec))
-            if all_coroutines:
-                await asyncio.gather(*all_coroutines)
+                    await run_independent_task(task_spec)
 
-        # Post-sample cleanup remains only for non-chain, multi-sample apply runs.
-        should_cleanup = (
-            (not args.plan_only)
-            and args.samples > 1
-            and (not args.chain)
-        )
-        if should_cleanup:
-            for cleanup_workspace in cleanup_workspaces:
-                await cleanup_workspace_if_state_exists(cleanup_workspace)
-        
     base_folder_name = model_config.get("folder_name", model_name)
     # Lock is scoped to the effective output folder (model + optional enhance strategy suffix)
     # so independent strategy runs can proceed without sharing a dataset directory/lock.

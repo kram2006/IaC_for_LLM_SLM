@@ -145,9 +145,12 @@ python src/evaluate.py \
 
 When `--task_id` and `--chain` are omitted, the runner executes the fixed 10-task benchmark order:
 
-`C1.1, C1.2, C2.2, C5.2, C1.3, U1.2, D1.2, C2.3, R1.2, D2.2`
+`C1.1 → C1.2 → C2.2 → C5.2 → [C1.3→U1.2→D1.2] → [C2.3→R1.2→D2.2]`
 
-Independent tasks (`C1.1`, `C1.2`, `C2.2`, `C5.2`) and the two chain groups (`C1.3→U1.2→D1.2` and `C2.3→R1.2→D2.2`) are dispatched **concurrently within each sample** via `asyncio.gather`. Tasks within each chain group still run sequentially to preserve stateful dependencies.
+Each task or chain group runs **sequentially**. After every task (or chain group) finishes — once all evaluation artifacts (dataset JSON, logs, Terraform files) have been saved — any VMs created are **destroyed** before the next task starts. This ensures each task begins on clean infrastructure.
+
+- **Independent tasks** (`C1.1`, `C1.2`, `C2.2`, `C5.2`): no shared state with each other or with chain groups. VMs destroyed immediately after each one.
+- **Chain groups** (`C1.3→U1.2→D1.2`, `C2.3→R1.2→D2.2`): tasks within a group share a workspace so dependent state (e.g. VM IDs) is available to subsequent tasks. VMs are destroyed after the entire group completes.
 
 ```bash
 python src/evaluate.py \
@@ -156,8 +159,6 @@ python src/evaluate.py \
   --seed 42 \
   --no-confirm
 ```
-
-> Note: running all task groups concurrently increases API/provider call frequency and XO server load. Start with `--samples 1` and verify infrastructure capacity before increasing concurrency.
 
 ### 4.5 Prompt enhancement variants
 
@@ -268,7 +269,7 @@ python llm_judge.py \
 4. **Task ordering / chain policy** (`evaluate.py`)  
    Applies fixed benchmark order and chain fallback rules.
 5. **Sample loop** (`evaluate.py`)  
-   Executes requested `--samples` per task/chain in parallel. Within each sample, independent tasks and chain groups also run concurrently via `asyncio.gather`.
+   Executes requested `--samples` per task/chain in parallel. Within each sample, tasks and chain groups run **sequentially** in fixed order; VMs are destroyed after each task/group before the next begins.
 6. **Workspace and lock management** (`evaluate.py`)  
    Creates output folders and `.evaluation_in_progress`, cleans up at completion.
 

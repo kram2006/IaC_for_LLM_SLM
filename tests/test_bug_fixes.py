@@ -601,13 +601,16 @@ def test_preserve_tfstate_snapshot_returns_none_when_tfstate_missing(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Parallel benchmark mode orchestration tests
+# Sequential benchmark mode orchestration tests
 # ---------------------------------------------------------------------------
 
-def test_benchmark_mode_uses_asyncio_gather_for_task_concurrency():
-    """Benchmark mode must use asyncio.gather to dispatch independent tasks and chain groups concurrently."""
+def test_benchmark_mode_uses_sequential_task_execution():
+    """Benchmark mode must execute tasks sequentially (no asyncio.gather over task groups)."""
     evaluate_source = Path(SRC_DIR, "evaluate.py").read_text(encoding="utf-8")
-    assert "await asyncio.gather(*all_coroutines)" in evaluate_source
+    # Sequential path uses direct awaits, not a gathered coroutine list.
+    assert "await asyncio.gather(*all_coroutines)" not in evaluate_source
+    assert "await run_independent_task(task_spec)" in evaluate_source
+    assert "await run_chain_group(chain_group)" in evaluate_source
 
 
 def test_benchmark_mode_independent_task_ids_are_correct():
@@ -623,40 +626,52 @@ def test_benchmark_mode_independent_task_ids_are_correct():
     assert expected_independent == INDEPENDENT_TASK_IDS
 
 
-def test_benchmark_parallel_dispatch_produces_six_coroutine_groups():
+def test_benchmark_sequential_dispatch_produces_six_groups():
     """
-    The coroutine-building loop must produce exactly 6 groups for concurrent dispatch:
-    4 independent task coroutines + 2 chain-group coroutines.
+    The sequential dispatch loop must produce exactly 6 execution units:
+    4 independent task steps + 2 chain-group steps.
     """
     from evaluate import PARTIAL_CHAIN_GROUPS_BY_START, FIXED_BENCHMARK_TASK_ORDER, INDEPENDENT_TASK_IDS
 
     seen_chain_ids = set()
-    coroutine_labels = []
+    group_labels = []
     for task_id_normalized in FIXED_BENCHMARK_TASK_ORDER:
         if task_id_normalized in seen_chain_ids:
             continue
         chain_group = PARTIAL_CHAIN_GROUPS_BY_START.get(task_id_normalized)
         if chain_group:
-            coroutine_labels.append(("chain", tuple(chain_group)))
+            group_labels.append(("chain", tuple(chain_group)))
             seen_chain_ids.update(chain_group)
         else:
-            coroutine_labels.append(("independent", task_id_normalized))
+            group_labels.append(("independent", task_id_normalized))
 
-    independent_labels = [lbl for kind, lbl in coroutine_labels if kind == "independent"]
-    chain_labels = [lbl for kind, lbl in coroutine_labels if kind == "chain"]
+    independent_labels = [lbl for kind, lbl in group_labels if kind == "independent"]
+    chain_labels = [lbl for kind, lbl in group_labels if kind == "chain"]
 
-    assert len(coroutine_labels) == 6
+    assert len(group_labels) == 6
     assert set(independent_labels) == INDEPENDENT_TASK_IDS
     assert len(chain_labels) == 2
 
 
-def test_benchmark_mode_no_stale_sequential_loop_over_tasks():
+def test_benchmark_mode_independent_task_always_destroys_after_completion():
     """
-    The standalone/benchmark mode must not use a bare sequential for-loop over tasks;
-    concurrent dispatch via asyncio.gather replaces the old sequential pattern.
+    run_independent_task must destroy the workspace after every task, not only for
+    tasks in INDEPENDENT_TASK_IDS. The old guard on INDEPENDENT_TASK_IDS must be absent.
     """
     evaluate_source = Path(SRC_DIR, "evaluate.py").read_text(encoding="utf-8")
-    # The old pattern used 'processed_chain_ids' for sequential skip-tracking;
-    # the new parallel pattern uses 'seen_chain_ids' and asyncio.gather.
-    assert "processed_chain_ids" not in evaluate_source
-    assert "seen_chain_ids" in evaluate_source
+    # The old guard conditioned cleanup on task_id membership in INDEPENDENT_TASK_IDS.
+    assert "in INDEPENDENT_TASK_IDS" not in evaluate_source
+
+
+def test_benchmark_mode_chain_group_destroys_workspace_after_completion():
+    """run_chain_group must call cleanup_workspace_if_state_exists on the shared workspace."""
+    evaluate_source = Path(SRC_DIR, "evaluate.py").read_text(encoding="utf-8")
+    # Verify the cleanup call appears inside run_chain_group (after the while loop).
+    assert "await cleanup_workspace_if_state_exists(shared_chain_workspace)" in evaluate_source
+
+
+def test_explicit_chain_mode_destroys_workspace_after_chain_completes():
+    """The --chain explicit mode must destroy the chain workspace after all tasks finish."""
+    evaluate_source = Path(SRC_DIR, "evaluate.py").read_text(encoding="utf-8")
+    # The cleanup call for --chain mode uses workspace_dir (not shared_chain_workspace).
+    assert "await cleanup_workspace_if_state_exists(workspace_dir)" in evaluate_source

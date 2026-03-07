@@ -598,3 +598,65 @@ def test_preserve_tfstate_snapshot_returns_none_when_tfstate_missing(tmp_path):
     workspace_dir = tmp_path / "workspace"
     workspace_dir.mkdir()
     assert _preserve_tfstate_snapshot(str(workspace_dir), snapshot_label="C1_2_p1") is None
+
+
+# ---------------------------------------------------------------------------
+# Parallel benchmark mode orchestration tests
+# ---------------------------------------------------------------------------
+
+def test_benchmark_mode_uses_asyncio_gather_for_task_concurrency():
+    """Benchmark mode must use asyncio.gather to dispatch independent tasks and chain groups concurrently."""
+    evaluate_source = Path(SRC_DIR, "evaluate.py").read_text(encoding="utf-8")
+    assert "await asyncio.gather(*all_coroutines)" in evaluate_source
+
+
+def test_benchmark_mode_independent_task_ids_are_correct():
+    """The four independent task IDs in the benchmark must not belong to any chain group."""
+    from evaluate import PARTIAL_CHAIN_GROUPS_BY_START, FIXED_BENCHMARK_TASK_ORDER, INDEPENDENT_TASK_IDS
+
+    all_chain_ids = set()
+    for group in PARTIAL_CHAIN_GROUPS_BY_START.values():
+        all_chain_ids.update(group)
+
+    benchmark_ids = set(FIXED_BENCHMARK_TASK_ORDER)
+    expected_independent = benchmark_ids - all_chain_ids
+    assert expected_independent == INDEPENDENT_TASK_IDS
+
+
+def test_benchmark_parallel_dispatch_produces_six_coroutine_groups():
+    """
+    The coroutine-building loop must produce exactly 6 groups for concurrent dispatch:
+    4 independent task coroutines + 2 chain-group coroutines.
+    """
+    from evaluate import PARTIAL_CHAIN_GROUPS_BY_START, FIXED_BENCHMARK_TASK_ORDER, INDEPENDENT_TASK_IDS
+
+    seen_chain_ids = set()
+    coroutine_labels = []
+    for task_id_normalized in FIXED_BENCHMARK_TASK_ORDER:
+        if task_id_normalized in seen_chain_ids:
+            continue
+        chain_group = PARTIAL_CHAIN_GROUPS_BY_START.get(task_id_normalized)
+        if chain_group:
+            coroutine_labels.append(("chain", tuple(chain_group)))
+            seen_chain_ids.update(chain_group)
+        else:
+            coroutine_labels.append(("independent", task_id_normalized))
+
+    independent_labels = [lbl for kind, lbl in coroutine_labels if kind == "independent"]
+    chain_labels = [lbl for kind, lbl in coroutine_labels if kind == "chain"]
+
+    assert len(coroutine_labels) == 6
+    assert set(independent_labels) == INDEPENDENT_TASK_IDS
+    assert len(chain_labels) == 2
+
+
+def test_benchmark_mode_no_stale_sequential_loop_over_tasks():
+    """
+    The standalone/benchmark mode must not use a bare sequential for-loop over tasks;
+    concurrent dispatch via asyncio.gather replaces the old sequential pattern.
+    """
+    evaluate_source = Path(SRC_DIR, "evaluate.py").read_text(encoding="utf-8")
+    # The old pattern used 'processed_chain_ids' for sequential skip-tracking;
+    # the new parallel pattern uses 'seen_chain_ids' and asyncio.gather.
+    assert "processed_chain_ids" not in evaluate_source
+    assert "seen_chain_ids" in evaluate_source

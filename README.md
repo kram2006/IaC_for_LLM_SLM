@@ -147,6 +147,8 @@ When `--task_id` and `--chain` are omitted, the runner executes the fixed 10-tas
 
 `C1.1, C1.2, C2.2, C5.2, C1.3, U1.2, D1.2, C2.3, R1.2, D2.2`
 
+Independent tasks (`C1.1`, `C1.2`, `C2.2`, `C5.2`) and the two chain groups (`C1.3→U1.2→D1.2` and `C2.3→R1.2→D2.2`) are dispatched **concurrently within each sample** via `asyncio.gather`. Tasks within each chain group still run sequentially to preserve stateful dependencies.
+
 ```bash
 python src/evaluate.py \
   --model phi4_openrouter \
@@ -154,6 +156,8 @@ python src/evaluate.py \
   --seed 42 \
   --no-confirm
 ```
+
+> Note: running all task groups concurrently increases API/provider call frequency and XO server load. Start with `--samples 1` and verify infrastructure capacity before increasing concurrency.
 
 ### 4.5 Prompt enhancement variants
 
@@ -264,7 +268,7 @@ python llm_judge.py \
 4. **Task ordering / chain policy** (`evaluate.py`)  
    Applies fixed benchmark order and chain fallback rules.
 5. **Sample loop** (`evaluate.py`)  
-   Executes requested `--samples` per task/chain in parallel.
+   Executes requested `--samples` per task/chain in parallel. Within each sample, independent tasks and chain groups also run concurrently via `asyncio.gather`.
 6. **Workspace and lock management** (`evaluate.py`)  
    Creates output folders and `.evaluation_in_progress`, cleans up at completion.
 

@@ -289,7 +289,8 @@ async def main():
 
         tasks = [all_tasks_by_id[tid] for tid in chain_ids]
     elif not args.task_id:
-        # Fixed benchmark mode: deterministic, non-parallel ordered execution.
+        # Fixed benchmark mode: tasks ordered for chain-dependency correctness; independent
+        # tasks and chain groups run concurrently within each sample.
         tasks = _order_fixed_benchmark_tasks(dataset_tasks)
 
     # Pass@k Loop
@@ -392,69 +393,11 @@ async def main():
                     )
                 i = next_index
         else:
-            # Standalone mode: Each task gets its own workspace path
+            # Standalone / benchmark mode: independent tasks and chain groups run concurrently.
+            # Within each chain group, tasks remain sequential to preserve stateful dependencies.
             task_lookup = {str(t.get("task_id", "")).strip().lower(): t for t in tasks}
-            processed_chain_ids = set()
-            for task_spec in tasks:
-                task_id_normalized = str(task_spec.get("task_id", "")).strip().lower()
-                if task_id_normalized in processed_chain_ids:
-                    continue
 
-                chain_group = PARTIAL_CHAIN_GROUPS_BY_START.get(task_id_normalized)
-                if chain_group:
-                    chain_tasks = [task_lookup[tid] for tid in chain_group if tid in task_lookup]
-                    if len(chain_tasks) == len(chain_group):
-                        chain_task_names = [t.get('task_id', '').replace('.', '_') for t in chain_tasks]
-                        chain_slug = "_".join(chain_task_names)
-                        if len(chain_slug) > MAX_CHAIN_SLUG_LENGTH:
-                            chain_slug = hashlib.sha256(chain_slug.encode("utf-8")).hexdigest()[:CHAIN_HASH_LENGTH]
-                        shared_chain_workspace = os.path.join(
-                            args.output_dir,
-                            "terraform_code",
-                            effective_folder_name,
-                            f"chain_{chain_slug}_p{pass_num}"
-                        )
-                        os.makedirs(shared_chain_workspace, exist_ok=True)
-                        cleanup_workspaces.append(shared_chain_workspace)
-                        i = 0
-                        while i < len(chain_tasks):
-                            chain_task_spec = chain_tasks[i]
-                            chain_task_category = chain_task_spec.get('category', '').strip().upper()
-                            chain_task_plan_only = args.plan_only or (chain_task_category == 'READ')
-                            chain_task_workspace = shared_chain_workspace
-                            # Keep dependent-context tfstate sourced from shared chain workspace
-                            # even when READ executes in an isolated read workspace.
-                            chain_state_workspace_for_dependent_context = shared_chain_workspace
-                            if chain_task_category == 'READ':
-                                chain_task_workspace = os.path.join(
-                                    args.output_dir,
-                                    "terraform_code",
-                                    effective_folder_name,
-                                    f"chain_{chain_slug}_read_{chain_task_spec.get('task_id', '').replace('.', '_')}_p{pass_num}"
-                                )
-                                os.makedirs(chain_task_workspace, exist_ok=True)
-                                cleanup_workspaces.append(chain_task_workspace)
-                            chain_result = await evaluate_task(
-                                task=chain_task_spec,
-                                config=expanded_config,
-                                client=client,
-                                output_dir=args.output_dir,
-                                workspace_override=chain_task_workspace,
-                                plan_only=chain_task_plan_only,
-                                sample_num=pass_num,
-                                chain_index=i,
-                                state_workspace_override=chain_state_workspace_for_dependent_context,
-                                no_confirm=args.no_confirm,
-                                enhance_strat=args.enhance_strat,
-                                return_result=True
-                            )
-                            next_index = _next_chain_index_after_result(chain_tasks, i, chain_result.get("success", False))
-                            if next_index is None:
-                                break
-                            i = next_index
-                        processed_chain_ids.update(chain_group)
-                        continue
-
+            async def run_independent_task(task_spec):
                 tid = task_spec.get('task_id', '').replace('.', '_')
                 sample_workspace = os.path.join(
                     args.output_dir,
@@ -464,7 +407,7 @@ async def main():
                 )
                 os.makedirs(sample_workspace, exist_ok=True)
                 cleanup_workspaces.append(sample_workspace)
-                
+
                 await evaluate_task(
                     task=task_spec,
                     config=expanded_config,
@@ -480,6 +423,75 @@ async def main():
                 # evaluate_task writes dataset JSON before returning; cleanup must happen strictly after that.
                 if (not args.plan_only) and task_spec.get("task_id", "").strip().lower() in INDEPENDENT_TASK_IDS:
                     await cleanup_workspace_if_state_exists(sample_workspace)
+
+            async def run_chain_group(chain_group_ids):
+                chain_tasks = [task_lookup[tid] for tid in chain_group_ids if tid in task_lookup]
+                if len(chain_tasks) != len(chain_group_ids):
+                    return
+                chain_task_names = [t.get('task_id', '').replace('.', '_') for t in chain_tasks]
+                chain_slug = "_".join(chain_task_names)
+                if len(chain_slug) > MAX_CHAIN_SLUG_LENGTH:
+                    chain_slug = hashlib.sha256(chain_slug.encode("utf-8")).hexdigest()[:CHAIN_HASH_LENGTH]
+                shared_chain_workspace = os.path.join(
+                    args.output_dir,
+                    "terraform_code",
+                    effective_folder_name,
+                    f"chain_{chain_slug}_p{pass_num}"
+                )
+                os.makedirs(shared_chain_workspace, exist_ok=True)
+                cleanup_workspaces.append(shared_chain_workspace)
+                i = 0
+                while i < len(chain_tasks):
+                    chain_task_spec = chain_tasks[i]
+                    chain_task_category = chain_task_spec.get('category', '').strip().upper()
+                    chain_task_plan_only = args.plan_only or (chain_task_category == 'READ')
+                    chain_task_workspace = shared_chain_workspace
+                    # Keep dependent-context tfstate sourced from shared chain workspace
+                    # even when READ executes in an isolated read workspace.
+                    chain_state_workspace_for_dependent_context = shared_chain_workspace
+                    if chain_task_category == 'READ':
+                        chain_task_workspace = os.path.join(
+                            args.output_dir,
+                            "terraform_code",
+                            effective_folder_name,
+                            f"chain_{chain_slug}_read_{chain_task_spec.get('task_id', '').replace('.', '_')}_p{pass_num}"
+                        )
+                        os.makedirs(chain_task_workspace, exist_ok=True)
+                        cleanup_workspaces.append(chain_task_workspace)
+                    chain_result = await evaluate_task(
+                        task=chain_task_spec,
+                        config=expanded_config,
+                        client=client,
+                        output_dir=args.output_dir,
+                        workspace_override=chain_task_workspace,
+                        plan_only=chain_task_plan_only,
+                        sample_num=pass_num,
+                        chain_index=i,
+                        state_workspace_override=chain_state_workspace_for_dependent_context,
+                        no_confirm=args.no_confirm,
+                        enhance_strat=args.enhance_strat,
+                        return_result=True
+                    )
+                    next_index = _next_chain_index_after_result(chain_tasks, i, chain_result.get("success", False))
+                    if next_index is None:
+                        break
+                    i = next_index
+
+            # Build one coroutine per independent task and one per chain group, then run all concurrently.
+            all_coroutines = []
+            seen_chain_ids = set()
+            for task_spec in tasks:
+                task_id_normalized = str(task_spec.get("task_id", "")).strip().lower()
+                if task_id_normalized in seen_chain_ids:
+                    continue
+                chain_group = PARTIAL_CHAIN_GROUPS_BY_START.get(task_id_normalized)
+                if chain_group:
+                    all_coroutines.append(run_chain_group(chain_group))
+                    seen_chain_ids.update(chain_group)
+                else:
+                    all_coroutines.append(run_independent_task(task_spec))
+            if all_coroutines:
+                await asyncio.gather(*all_coroutines)
 
         # Post-sample cleanup remains only for non-chain, multi-sample apply runs.
         should_cleanup = (

@@ -73,13 +73,17 @@ def _extract_infra_context_from_tfstate(tfstate_path):
     return context
 
 async def _verify_vms_with_retry(xo_client, attempts=POST_STATE_RETRY_ATTEMPTS, delay_seconds=POST_STATE_RETRY_DELAY_SECONDS):
-    """Retry XO verification to reduce eventual-consistency false negatives right after apply."""
+    """Retry XO verification to reduce eventual-consistency false negatives right after apply.
+    Negative delays are treated as 0 seconds.
+    """
     last_result = None
     total_attempts = max(1, int(attempts or 1))
+    safe_delay_seconds = max(0, delay_seconds)
     for attempt in range(total_attempts):
         last_result = await xo_client.verify_vms(force_refresh=True)
         if attempt < total_attempts - 1:
-            await asyncio.sleep(max(0, delay_seconds))
+            await asyncio.sleep(safe_delay_seconds)
+    # verify_vms may return None on transport failures; keep a stable dict shape for downstream checks.
     return last_result if last_result is not None else {"actual_vm_count": 0, "vm_details": []}
 
 async def evaluate_task(task, config, client, output_dir, workspace_override=None, initial_history=None, plan_only=False, sample_num=0, chain_index=0, no_confirm=False, enhance_strat="", return_result=False, state_workspace_override=None):

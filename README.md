@@ -104,6 +104,7 @@ python src/evaluate.py \
 ```
 
 > Important: when `--samples > 1`, the runner now executes samples in parallel with isolated sample workspaces/artifacts.
+> For large sample counts, consider API/provider rate limits and local CPU/RAM capacity before increasing concurrency (a practical starting point is `--samples 2` to `--samples 4`).
 
 ### 4.3 Full chain execution (stateful lifecycle)
 

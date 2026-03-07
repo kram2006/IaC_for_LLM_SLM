@@ -308,15 +308,31 @@ def test_verify_vms_with_retry_retries_and_returns_last_result():
     class _StubXOClient:
         def __init__(self):
             self.calls = 0
+            self.force_refresh_values = []
         async def verify_vms(self, force_refresh=False):
             self.calls += 1
+            self.force_refresh_values.append(force_refresh)
             return {"actual_vm_count": self.calls, "force_refresh": force_refresh}
 
     xo_client = _StubXOClient()
     result = asyncio.run(_verify_vms_with_retry(xo_client, attempts=3, delay_seconds=0))
     assert xo_client.calls == 3
+    assert xo_client.force_refresh_values == [True, True, True]
     assert result["actual_vm_count"] == 3
     assert result["force_refresh"] is True
+
+def test_verify_vms_with_retry_handles_non_positive_attempts_and_negative_delay():
+    class _StubXOClient:
+        def __init__(self):
+            self.calls = 0
+        async def verify_vms(self, force_refresh=False):
+            self.calls += 1
+            return {"actual_vm_count": self.calls}
+
+    xo_client = _StubXOClient()
+    result = asyncio.run(_verify_vms_with_retry(xo_client, attempts=0, delay_seconds=-5))
+    assert xo_client.calls == 1
+    assert result["actual_vm_count"] == 1
 
 
 def test_delete_validation_enforces_zero_delete_count():

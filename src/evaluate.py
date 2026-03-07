@@ -492,6 +492,8 @@ async def main():
                 await cleanup_workspace_if_state_exists(cleanup_workspace)
         
     base_folder_name = model_config.get("folder_name", model_name)
+    # Lock is scoped to the effective output folder (model + optional enhance strategy suffix)
+    # so independent strategy runs can proceed without sharing a dataset directory/lock.
     effective_lock_folder = f"{base_folder_name}_{args.enhance_strat}" if args.enhance_strat else base_folder_name
     dataset_lock_dir = os.path.join(args.output_dir, "dataset", effective_lock_folder)
     os.makedirs(dataset_lock_dir, exist_ok=True)
@@ -508,7 +510,17 @@ async def main():
             lock_file.write(f"model={model_name}\n")
 
         print(f"\n{BOLD}{CYAN}>>> Running {num_passes} samples in parallel...{RESET}")
-        await asyncio.gather(*(run_sample(p) for p in range(pass_start, pass_start + num_passes)))
+        if num_passes > 1:
+            log_step("Parallel sampling increases provider/API and local resource usage. Tune --samples to your capacity.")
+        sample_results = await asyncio.gather(
+            *(run_sample(p) for p in range(pass_start, pass_start + num_passes)),
+            return_exceptions=True
+        )
+        sample_failures = [res for res in sample_results if isinstance(res, Exception)]
+        if sample_failures:
+            for idx, failure in enumerate(sample_failures, start=1):
+                log_error(f"Sample failure {idx}/{len(sample_failures)}: {failure}")
+            raise RuntimeError(f"{len(sample_failures)} sample(s) failed during parallel execution.")
     finally:
         unload_ollama_model(model_config)
         if os.path.exists(lockfile_path):

@@ -39,7 +39,9 @@ from complexity_scorer import score_dataset
 
 
 def test_extract_terraform_code_keeps_non_empty_when_language_line_has_no_newline():
-    assert extract_terraform_code("```hcl```") == "hcl"
+    # A code fence with only a language tag and no body produces no usable code.
+    # The function should return empty string rather than the tag word itself.
+    assert extract_terraform_code("```hcl```") == ""
 
 
 def test_execute_command_timeout_returns_timeout_status():
@@ -722,12 +724,12 @@ def test_copy_chain_tfstate_skips_when_source_absent(tmp_path):
 
 
 def test_copy_chain_tfstate_skips_when_source_too_small(tmp_path):
-    """_copy_chain_tfstate must ignore state files that are ≤10 bytes (empty/stub)."""
+    """_copy_chain_tfstate must ignore state files that are below TFSTATE_MIN_VALID_BYTES (stub)."""
     src_ws = tmp_path / "src_ws"
     dst_ws = tmp_path / "dst_ws"
     src_ws.mkdir()
     dst_ws.mkdir()
-    (src_ws / "terraform.tfstate").write_text("{}", encoding="utf-8")  # 2 bytes
+    (src_ws / "terraform.tfstate").write_text("{}", encoding="utf-8")  # 2 bytes — stub
 
     _copy_chain_tfstate(str(src_ws), str(dst_ws))
 
@@ -775,3 +777,76 @@ def test_chain_cleanup_uses_last_task_workspace():
     # Old variables must not appear in cleanup positions.
     assert "await cleanup_workspace_if_state_exists(workspace_dir)" not in evaluate_source
     assert "await cleanup_workspace_if_state_exists(shared_chain_workspace)" not in evaluate_source
+
+
+# ---------------------------------------------------------------------------
+# extract_terraform_code — bug-fix regression tests
+# ---------------------------------------------------------------------------
+
+_VM = 'resource "xenorchestra_vm" "vm" {}'
+
+def test_extract_terraform_code_strips_tf_language_tag():
+    """Bug fix: 'tf' and 'TF' language tags must be stripped, not left in the output."""
+    for tag in ("tf", "TF"):
+        result = extract_terraform_code(f"```{tag}\n{_VM}\n```")
+        assert result == _VM, f"tag '{tag}' was not stripped: {repr(result)}"
+
+    # Code block with no language tag at all must still be extracted correctly.
+    result_no_tag = extract_terraform_code(f"```\n{_VM}\n```")
+    assert result_no_tag == _VM, f"no-tag block broken: {repr(result_no_tag)}"
+
+
+def test_extract_terraform_code_handles_unclosed_fence():
+    """Bug fix: model output truncated by max_tokens leaves an unclosed fence.
+    The function must still return the code without the backtick/tag prefix."""
+    truncated = f"```hcl\n{_VM}"   # no closing ```
+    result = extract_terraform_code(truncated)
+    assert "```" not in result, "backtick prefix leaked into extracted code"
+    assert "hcl" not in result, "language tag leaked into extracted code"
+    assert _VM in result
+
+
+def test_extract_terraform_code_returns_last_block_for_multi_block_response():
+    """Bug fix: when the LLM repeats an example code block before the real answer
+    (common in COT/FSP responses), the LAST code block must be returned."""
+    example_vm = 'resource "xenorchestra_vm" "build_01" { name_label = "build-01" }'
+    real_vm    = 'resource "xenorchestra_vm" "app_01" { name_label = "app-01" }'
+    response = (
+        "Here is a worked example:\n"
+        f"```hcl\n{example_vm}\n```\n\n"
+        "My actual answer:\n"
+        f"```hcl\n{real_vm}\n```"
+    )
+    result = extract_terraform_code(response)
+    assert "app_01" in result,   f"last (real) block not returned; got: {repr(result[:80])}"
+    assert "build_01" not in result, "first (example) block was returned instead of last"
+
+
+def test_extract_terraform_code_does_not_strip_terraform_keyword():
+    """'terraform {' at the top of a config must NOT have its keyword removed."""
+    config = "```\nterraform {\n  required_providers {}\n}\n```"
+    result = extract_terraform_code(config)
+    assert result.startswith("terraform {"), f"terraform keyword stripped: {repr(result[:40])}"
+
+
+def test_extract_terraform_code_handles_leading_newline_before_lang_tag():
+    """Blank line between opening fence and language tag must not leave tag in output.
+    Input structure: ``` ↵ hcl ↵ <code> ``` — 'hcl' is on its own line after the fence."""
+    response = f"```\nhcl\n{_VM}\n```"   # newline THEN hcl THEN code
+    result = extract_terraform_code(response)
+    assert _VM in result, f"code not found in result: {repr(result)}"
+    # The word 'hcl' must not appear at the start of the extracted code.
+    assert not result.startswith("hcl"), f"language tag leaked into start of output: {repr(result[:30])}"
+    # Ensure the tag is gone from the output entirely (not just shifted).
+    assert result.strip() == _VM, f"unexpected content: {repr(result)}"
+
+
+def test_extract_terraform_code_crlf_line_endings():
+    """Windows CRLF line endings inside a code fence must be handled cleanly."""
+    result = extract_terraform_code(f"```hcl\r\n{_VM}\r\n```")
+    assert _VM in result
+
+
+def test_extract_terraform_code_returns_empty_for_plain_prose():
+    """A plain-text response with no HCL markers must return an empty string."""
+    assert extract_terraform_code("I cannot generate Terraform code for this task.") == ""

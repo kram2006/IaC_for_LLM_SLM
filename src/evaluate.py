@@ -33,9 +33,10 @@ from models import GlobalConfig, ModelConfig
 
 MAX_CHAIN_SLUG_LENGTH = 50
 CHAIN_HASH_LENGTH = 16
-# Minimum number of bytes a terraform.tfstate file must contain to be considered
-# non-empty and worth copying or snapshotting (guards against zero-byte stubs).
-MIN_TFSTATE_SIZE_BYTES = 10
+# A terraform.tfstate file must contain at least this many bytes to be considered
+# non-empty and worth copying or snapshotting.  Files strictly below this threshold
+# are stubs (e.g. {} = 2 bytes) and are silently skipped.
+TFSTATE_MIN_VALID_BYTES = 11
 PLACEHOLDER_PATTERN = re.compile(r'^\$\{[^}]+\}$')
 DEFAULT_OPENROUTER_TIMEOUT = 300
 DEFAULT_OPENROUTER_MAX_RETRIES = 3
@@ -136,7 +137,7 @@ def _copy_chain_tfstate(src_workspace, dst_workspace):
     empty the copy is silently skipped and the destination task starts with a clean slate.
     """
     src = os.path.join(src_workspace, "terraform.tfstate")
-    if not os.path.exists(src) or os.path.getsize(src) <= MIN_TFSTATE_SIZE_BYTES:
+    if not os.path.exists(src) or os.path.getsize(src) < TFSTATE_MIN_VALID_BYTES:
         return
     dst = os.path.join(dst_workspace, "terraform.tfstate")
     shutil.copy2(src, dst)

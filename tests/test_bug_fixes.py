@@ -21,7 +21,7 @@ from spec_checker import DeleteValidation
 from spec_checker import CreateValidation, ReadValidation, UpdateValidation
 from compute_metrics import compute_metrics_for_folder, calculate_pass_at_k
 from evaluate import _validate_local_path, _next_chain_index_after_result, _order_fixed_benchmark_tasks, load_config
-from eval_core import _extract_infra_context_from_tfstate
+from eval_core import _extract_infra_context_from_tfstate, _resolve_tfstate_context_path
 from spec_checker import get_plan_json, _extract_vm_resources
 from json_generator import redact_sensitive_text as redact_json_sensitive_text, check_compliance
 from json_generator import generate_dataset_entry
@@ -501,6 +501,16 @@ def test_extract_infra_context_from_tfstate_returns_ids_and_uuids(tmp_path):
     assert context["data_resources"][0]["id"] == "pool-id-1"
     assert context["managed_vms"][0]["id"] == "vm-id-1"
     assert context["managed_vms"][0]["uuid"] == "vm-uuid-1"
+
+
+def test_resolve_tfstate_context_path_defaults_to_execution_workspace():
+    path = _resolve_tfstate_context_path("/tmp/exec_workspace")
+    assert path == "/tmp/exec_workspace/terraform.tfstate"
+
+
+def test_resolve_tfstate_context_path_prefers_state_workspace_override():
+    path = _resolve_tfstate_context_path("/tmp/read_workspace", "/tmp/shared_chain_workspace")
+    assert path == "/tmp/shared_chain_workspace/terraform.tfstate"
 
 
 def test_order_fixed_benchmark_tasks_returns_expected_sequence():

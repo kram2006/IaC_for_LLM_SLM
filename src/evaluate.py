@@ -323,6 +323,9 @@ async def main():
                 task_category = task_spec.get('category', '').strip().upper()
                 task_plan_only = args.plan_only or (task_category == 'READ')
                 task_workspace = workspace_dir
+                # Keep dependent-context tfstate sourced from shared chain workspace
+                # even when READ executes in an isolated read workspace.
+                state_workspace_for_dependent_context = workspace_dir
                 if task_category == 'READ':
                     task_workspace = os.path.join(
                         args.output_dir,
@@ -343,6 +346,7 @@ async def main():
                     plan_only=task_plan_only,
                     sample_num=pass_num,
                     chain_index=i,
+                    state_workspace_override=state_workspace_for_dependent_context,
                     no_confirm=args.no_confirm,
                     enhance_strat=args.enhance_strat,
                     return_result=True
@@ -389,6 +393,9 @@ async def main():
                             chain_task_category = chain_task_spec.get('category', '').strip().upper()
                             chain_task_plan_only = args.plan_only or (chain_task_category == 'READ')
                             chain_task_workspace = shared_chain_workspace
+                            # Keep dependent-context tfstate sourced from shared chain workspace
+                            # even when READ executes in an isolated read workspace.
+                            chain_state_workspace_for_dependent_context = shared_chain_workspace
                             if chain_task_category == 'READ':
                                 chain_task_workspace = os.path.join(
                                     args.output_dir,
@@ -408,6 +415,7 @@ async def main():
                                 plan_only=chain_task_plan_only,
                                 sample_num=pass_num,
                                 chain_index=i,
+                                state_workspace_override=chain_state_workspace_for_dependent_context,
                                 no_confirm=args.no_confirm,
                                 enhance_strat=args.enhance_strat,
                                 return_result=True

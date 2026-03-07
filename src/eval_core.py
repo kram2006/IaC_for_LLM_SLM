@@ -24,6 +24,12 @@ RESOURCE_EXHAUSTION_MARKERS = ('insufficient memory', 'out of memory', 'not enou
 # Normalized-lowercase IDs for fixed benchmark tasks that require dependent context enrichment.
 DEPENDENT_CONTEXT_TASK_IDS = {"u1.2", "d1.2", "r1.2", "d2.2"}
 
+
+def _resolve_tfstate_context_path(workspace_dir, state_workspace_override=None):
+    """Return terraform.tfstate path used for dependent-context injection."""
+    context_workspace = state_workspace_override or workspace_dir
+    return os.path.join(context_workspace, "terraform.tfstate")
+
 def _extract_infra_context_from_tfstate(tfstate_path):
     """Extract a compact, identifier-focused infrastructure summary from terraform.tfstate."""
     try:
@@ -64,7 +70,7 @@ def _extract_infra_context_from_tfstate(tfstate_path):
 
     return context
 
-async def evaluate_task(task, config, client, output_dir, workspace_override=None, initial_history=None, plan_only=False, sample_num=0, chain_index=0, no_confirm=False, enhance_strat="", return_result=False):
+async def evaluate_task(task, config, client, output_dir, workspace_override=None, initial_history=None, plan_only=False, sample_num=0, chain_index=0, no_confirm=False, enhance_strat="", return_result=False, state_workspace_override=None):
     """
     Core evaluation logic for a single task and sample.
     Orchestrates LLM generation, Terraform execution, and state verification.
@@ -128,7 +134,7 @@ async def evaluate_task(task, config, client, output_dir, workspace_override=Non
     is_dependent_context_task = raw_task_id in DEPENDENT_CONTEXT_TASK_IDS
     should_inject_dependent_context = has_shared_workspace and is_dependent_chain_step and is_dependent_context_task
     if should_inject_dependent_context:
-        tfstate_path = os.path.join(workspace_dir, "terraform.tfstate")
+        tfstate_path = _resolve_tfstate_context_path(workspace_dir, state_workspace_override)
         if os.path.exists(tfstate_path) and os.path.getsize(tfstate_path) > 10:
             try:
                 infra_context = _extract_infra_context_from_tfstate(tfstate_path)
@@ -140,7 +146,10 @@ async def evaluate_task(task, config, client, output_dir, workspace_override=Non
                     "(relevant identifiers and VM details only):\n"
                     f"```json\n{tfstate_context}\n```\n"
                 )
-                log_step("Injected extracted terraform state context into system prompt for dependent task")
+                log_step(
+                    "Injected extracted terraform state context into system prompt for dependent task "
+                    f"from {tfstate_path}"
+                )
             except Exception as e:
                 log_error(f"Failed to read tfstate for context: {e}")
         else:

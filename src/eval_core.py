@@ -21,8 +21,50 @@ VALID_TASK_CATEGORIES = {"CREATE", "READ", "UPDATE", "DELETE"}
 # Keep only a bounded tail of retry errors to prevent unbounded in-memory context growth.
 MAX_ERROR_HISTORY = 5
 RESOURCE_EXHAUSTION_MARKERS = ('insufficient memory', 'out of memory', 'not enough memory')
+# Normalized-lowercase IDs for fixed benchmark tasks that require dependent context enrichment.
+DEPENDENT_CONTEXT_TASK_IDS = {"u1.2", "d1.2", "r1.2", "d2.2"}
 
-async def evaluate_task(task, config, client, output_dir, workspace_override=None, initial_history=None, plan_only=False, sample_num=0, chain_index=0, no_confirm=False, enhance_strat=""):
+def _extract_infra_context_from_tfstate(tfstate_path):
+    """Extract a compact, identifier-focused infrastructure summary from terraform.tfstate."""
+    try:
+        with open(tfstate_path, "r", encoding="utf-8") as f:
+            tfstate = json.load(f)
+    except (OSError, json.JSONDecodeError) as exc:
+        return {"error": f"Failed to parse terraform state: {exc}"}
+
+    context = {"data_resources": [], "managed_vms": []}
+    for resource in tfstate.get("resources", []):
+        resource_type = resource.get("type")
+        mode = resource.get("mode")
+        instances = resource.get("instances", [])
+        if not instances:
+            continue
+
+        for instance in instances:
+            attrs = instance.get("attributes") or {}
+            if not isinstance(attrs, dict):
+                continue
+
+            if mode == "data":
+                entry = {"type": resource_type}
+                # Keep identifier-level fields most useful to downstream prompts (IDs/labels/pool/network linkage).
+                for key in ("id", "uuid", "name_label", "pool_id", "bridge"):
+                    if attrs.get(key) is not None:
+                        entry[key] = attrs.get(key)
+                if len(entry) > 1:
+                    context["data_resources"].append(entry)
+            elif mode == "managed" and resource_type == "xenorchestra_vm":
+                vm_entry = {}
+                # Keep VM identity + sizing fields that help UPDATE/DELETE dependent tasks reason about targets.
+                for key in ("id", "uuid", "name_label", "name", "cpus", "memory_max", "power_state"):
+                    if attrs.get(key) is not None:
+                        vm_entry[key] = attrs.get(key)
+                if vm_entry:
+                    context["managed_vms"].append(vm_entry)
+
+    return context
+
+async def evaluate_task(task, config, client, output_dir, workspace_override=None, initial_history=None, plan_only=False, sample_num=0, chain_index=0, no_confirm=False, enhance_strat="", return_result=False):
     """
     Core evaluation logic for a single task and sample.
     Orchestrates LLM generation, Terraform execution, and state verification.
@@ -80,21 +122,29 @@ async def evaluate_task(task, config, client, output_dir, workspace_override=Non
         'TF_VAR_xo_password': xo_cfg.get('password', '')
     }
     
-    if workspace_override:
+    raw_task_id = str(task.get("task_id", "")).strip().lower()
+    has_shared_workspace = bool(workspace_override)
+    is_dependent_chain_step = chain_index > 0
+    is_dependent_context_task = raw_task_id in DEPENDENT_CONTEXT_TASK_IDS
+    should_inject_dependent_context = has_shared_workspace and is_dependent_chain_step and is_dependent_context_task
+    if should_inject_dependent_context:
         tfstate_path = os.path.join(workspace_dir, "terraform.tfstate")
         if os.path.exists(tfstate_path) and os.path.getsize(tfstate_path) > 10:
             try:
-                with open(tfstate_path, "r", encoding="utf-8") as f:
-                    tfstate_content = f.read()
-                # FLAW FIX: Cap tfstate to 4000 chars to prevent system prompt bloat
-                if len(tfstate_content) > 4000:
-                    tfstate_content = tfstate_content[:4000] + "\n... [TRUNCATED - full state in terraform.tfstate]"
-                system_prompt += f"\n\nExisting Infrastructure (CURRENT STATE from terraform.tfstate):\n```json\n{tfstate_content}\n```\n"
-                log_step("Injected terraform.tfstate into system prompt to save context memory")
+                infra_context = _extract_infra_context_from_tfstate(tfstate_path)
+                tfstate_context = json.dumps(infra_context, indent=2)
+                if len(tfstate_context) > 4000:
+                    tfstate_context = tfstate_context[:4000] + "\n... [TRUNCATED - extracted context]"
+                system_prompt += (
+                    "\n\nCurrent infrastructure details extracted from previous terraform state "
+                    "(relevant identifiers and VM details only):\n"
+                    f"```json\n{tfstate_context}\n```\n"
+                )
+                log_step("Injected extracted terraform state context into system prompt for dependent task")
             except Exception as e:
                 log_error(f"Failed to read tfstate for context: {e}")
         else:
-            log_step("No terraform.tfstate found yet (first task or failed apply). Proceeding without state context.")
+            log_step("No terraform.tfstate found yet for dependent task. Proceeding without state context.")
                 
     user_prompt = task['prompt']
     if enhance_strat == "COT":
@@ -362,4 +412,6 @@ provider "xenorchestra" {{
         verification_data=post_verification, pre_verification_data=pre_verification, config=config
     )
     save_dataset_entry(entry, output_dir, config)
+    if return_result:
+        return {"messages": messages, "success": success}
     return messages

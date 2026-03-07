@@ -20,7 +20,8 @@ from eval_utils import redact_sensitive_text as redact_eval_sensitive_text, reda
 from spec_checker import DeleteValidation
 from spec_checker import CreateValidation, ReadValidation, UpdateValidation
 from compute_metrics import compute_metrics_for_folder, calculate_pass_at_k
-from evaluate import _validate_local_path, load_config
+from evaluate import _validate_local_path, _next_chain_index_after_result, load_config
+from eval_core import _extract_infra_context_from_tfstate
 from spec_checker import get_plan_json, _extract_vm_resources
 from json_generator import redact_sensitive_text as redact_json_sensitive_text, check_compliance
 from json_generator import generate_dataset_entry
@@ -446,3 +447,57 @@ def test_evaluate_chain_rejects_unknown_task_ids():
     )
     assert result.returncode == 0
     assert "Unknown task IDs in --chain" in result.stdout
+
+
+def test_next_chain_index_after_result_respects_cleanup_progression():
+    chain_tasks = [
+        {"task_id": "C1.3", "category": "CREATE"},
+        {"task_id": "U1.2", "category": "UPDATE"},
+        {"task_id": "D1.2", "category": "DELETE"},
+    ]
+    assert _next_chain_index_after_result(chain_tasks, 0, True) == 1
+    assert _next_chain_index_after_result(chain_tasks, 0, False) == 2
+    assert _next_chain_index_after_result(chain_tasks, 1, False) == 2
+    assert _next_chain_index_after_result(chain_tasks, 2, False) is None
+
+
+def test_next_chain_index_after_result_chain2_falls_back_to_d2_2():
+    chain_tasks = [
+        {"task_id": "C2.3", "category": "CREATE"},
+        {"task_id": "R1.2", "category": "READ"},
+        {"task_id": "D2.2", "category": "DELETE"},
+    ]
+    assert _next_chain_index_after_result(chain_tasks, 0, False) == 2
+    assert _next_chain_index_after_result(chain_tasks, 1, False) == 2
+
+
+def test_extract_infra_context_from_tfstate_returns_ids_and_uuids(tmp_path):
+    tfstate_path = tmp_path / "terraform.tfstate"
+    tfstate_path.write_text(
+        """
+{
+  "resources": [
+    {
+      "mode": "data",
+      "type": "xenorchestra_pool",
+      "instances": [
+        {"attributes": {"id": "pool-id-1", "name_label": "DAO-Agentic-Infra"}}
+      ]
+    },
+    {
+      "mode": "managed",
+      "type": "xenorchestra_vm",
+      "instances": [
+        {"attributes": {"id": "vm-id-1", "uuid": "vm-uuid-1", "name_label": "app-01", "cpus": 2, "memory_max": 4294967296}}
+      ]
+    }
+  ]
+}
+""".strip(),
+        encoding="utf-8"
+    )
+
+    context = _extract_infra_context_from_tfstate(str(tfstate_path))
+    assert context["data_resources"][0]["id"] == "pool-id-1"
+    assert context["managed_vms"][0]["id"] == "vm-id-1"
+    assert context["managed_vms"][0]["uuid"] == "vm-uuid-1"

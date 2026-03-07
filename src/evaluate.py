@@ -32,6 +32,17 @@ CHAIN_HASH_LENGTH = 16
 PLACEHOLDER_PATTERN = re.compile(r'^\$\{[^}]+\}$')
 DEFAULT_OPENROUTER_TIMEOUT = 300
 DEFAULT_OPENROUTER_MAX_RETRIES = 3
+# Normalized-lowercase IDs for the fixed 10-task benchmark independent cleanup set.
+INDEPENDENT_TASK_IDS = {"c1.1", "c1.2", "c2.2", "c5.2"}
+# Fixed chain fallback rules for the 10-task benchmark:
+# chain 1: C1.3/U1.2 failures fall through to D1.2 cleanup;
+# chain 2: C2.3/R1.2 failures fall through to D2.2 cleanup.
+CHAIN_FALLBACK_DELETE_TASK_BY_FAILURE = {
+    "c1.3": "d1.2",
+    "u1.2": "d1.2",
+    "c2.3": "d2.2",
+    "r1.2": "d2.2",
+}
 
 def _validate_local_path(path_value, arg_name):
     normalized = os.path.normpath(path_value)
@@ -49,6 +60,21 @@ def _normalize_positive_int(value, fallback):
         return parsed if parsed > 0 else fallback
     except (TypeError, ValueError):
         return fallback
+
+def _next_chain_index_after_result(tasks, current_index, task_success):
+    """Decide next chain index based on task outcome and cleanup progression rules."""
+    if task_success:
+        next_index = current_index + 1
+        return next_index if next_index < len(tasks) else None
+
+    failed_task_id = str(tasks[current_index].get("task_id", "")).strip().lower()
+    fallback_delete_task_id = CHAIN_FALLBACK_DELETE_TASK_BY_FAILURE.get(failed_task_id)
+    if not fallback_delete_task_id:
+        return None
+    for idx in range(current_index + 1, len(tasks)):
+        if str(tasks[idx].get("task_id", "")).strip().lower() == fallback_delete_task_id:
+            return idx
+    return None
 
 def load_config(config_path):
     import re
@@ -237,11 +263,24 @@ async def main():
             'TF_VAR_xo_password': xo_cfg.get('password') or os.environ.get('XO_PASSWORD', '')
         }
         
-        has_previous_run = None
+        previous_messages = None
         workspace_dir = None
         base_folder_name = model_config.get('folder_name', model_name)
         effective_folder_name = f"{base_folder_name}_{args.enhance_strat}" if args.enhance_strat else base_folder_name
         
+        async def cleanup_workspace_if_state_exists(cleanup_workspace):
+            tfstate_path = os.path.join(cleanup_workspace, "terraform.tfstate")
+            if not os.path.exists(tfstate_path):
+                return
+            destroy_res = await execute_command(
+                "terraform destroy -auto-approve -no-color",
+                cwd=cleanup_workspace,
+                timeout=300,
+                env=tf_env
+            )
+            if destroy_res.get('exit_code') != 0:
+                log_error(f"Cleanup failed for {cleanup_workspace}: {destroy_res.get('stderr', '')}")
+
         if args.chain:
             # Chained mode: Shared workspace for all tasks in this sample
             chain_ids = [t['task_id'].replace('.', '_') for t in tasks]
@@ -257,7 +296,9 @@ async def main():
             os.makedirs(workspace_dir, exist_ok=True)
             cleanup_workspaces.append(workspace_dir)
             
-            for i, task_spec in enumerate(tasks):
+            i = 0
+            while i < len(tasks):
+                task_spec = tasks[i]
                 task_category = task_spec.get('category', '').strip().upper()
                 task_plan_only = args.plan_only or (task_category == 'READ')
                 task_workspace = workspace_dir
@@ -271,19 +312,30 @@ async def main():
                     os.makedirs(task_workspace, exist_ok=True)
                     cleanup_workspaces.append(task_workspace)
 
-                has_previous_run = await evaluate_task(
+                task_result = await evaluate_task(
                     task=task_spec,
                     config=expanded_config,
                     client=client,
                     output_dir=args.output_dir,
                     workspace_override=task_workspace,
-                    initial_history=has_previous_run,
+                    initial_history=previous_messages,
                     plan_only=task_plan_only,
                     sample_num=pass_num,
                     chain_index=i,
                     no_confirm=args.no_confirm,
-                    enhance_strat=args.enhance_strat
+                    enhance_strat=args.enhance_strat,
+                    return_result=True
                 )
+                previous_messages = task_result.get("messages")
+                next_index = _next_chain_index_after_result(tasks, i, task_result.get("success", False))
+                if next_index is None:
+                    break
+                is_fallback_jump = next_index > i + 1
+                if is_fallback_jump:
+                    log_step(
+                        f"Task {task_spec.get('task_id')} failed; skipping intermediate chain tasks and continuing with cleanup task {tasks[next_index].get('task_id')}"
+                    )
+                i = next_index
         else:
             # Standalone mode: Each task gets its own workspace path
             for task_spec in tasks:
@@ -308,21 +360,18 @@ async def main():
                     no_confirm=args.no_confirm,
                     enhance_strat=args.enhance_strat
                 )
+                if (not args.plan_only) and task_spec.get("task_id", "").strip().lower() in INDEPENDENT_TASK_IDS:
+                    await cleanup_workspace_if_state_exists(sample_workspace)
 
-        should_cleanup = not args.plan_only and args.samples > 1
+        # Post-sample cleanup remains only for non-chain, multi-sample apply runs.
+        should_cleanup = (
+            (not args.plan_only)
+            and args.samples > 1
+            and (not args.chain)
+        )
         if should_cleanup:
             for cleanup_workspace in cleanup_workspaces:
-                tfstate_path = os.path.join(cleanup_workspace, "terraform.tfstate")
-                if not os.path.exists(tfstate_path):
-                    continue
-                destroy_res = await execute_command(
-                    "terraform destroy -auto-approve -no-color",
-                    cwd=cleanup_workspace,
-                    timeout=300,
-                    env=tf_env
-                )
-                if destroy_res.get('exit_code') != 0:
-                    log_error(f"Post-sample cleanup failed for {cleanup_workspace}: {destroy_res.get('stderr', '')}")
+                await cleanup_workspace_if_state_exists(cleanup_workspace)
         
         unload_ollama_model(model_config)
 

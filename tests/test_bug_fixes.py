@@ -374,6 +374,44 @@ def test_generate_dataset_entry_fails_requirements_when_post_state_fails():
     assert entry["final_outcome"]["meets_requirements"] is False
 
 
+def test_generate_dataset_entry_separates_execution_from_spec_validation():
+    task = {
+        "task_id": "C1.1",
+        "category": "CREATE",
+        "prompt_type": "detailed",
+        "prompt": "Create one VM",
+        "resource_requirements": '{"count": 1}'
+    }
+    execution_results = {
+        "terraform_init": {"exit_code": 0, "execution_time_seconds": 0, "stderr": ""},
+        "terraform_validate": {"exit_code": 0, "execution_time_seconds": 0, "stderr": ""},
+        "terraform_plan": {"exit_code": 0, "execution_time_seconds": 0, "stdout": "Plan: 1 to add", "stderr": ""},
+        "terraform_apply": {"status": "success", "exit_code": 0, "execution_time_seconds": 0, "stderr": ""},
+        "spec_accuracy": {"status": "skipped", "passed": None, "errors": ["terraform show failed"], "checks_performed": []},
+        "iterations": 1,
+        "generation_time": 0,
+        "sample_num": 1,
+        "raw_llm_response": "",
+        "enhance_strat": ""
+    }
+    config = {
+        "active_model_name": "m",
+        "models": {"m": {"id_prefix": "m", "display_name": "Model", "name": "model"}}
+    }
+    entry = generate_dataset_entry(
+        task_data=task,
+        terraform_code='resource "xenorchestra_vm" "a" { memory_max = 2147483648 cpus = 2 size = 10737418240 }',
+        execution_results=execution_results,
+        verification_data={},
+        pre_verification_data={},
+        config=config
+    )
+    assert entry["final_outcome"]["plan_success"] is True
+    assert entry["final_outcome"]["apply_success"] is True
+    assert entry["final_outcome"]["execution_successful"] is True
+    assert entry["final_outcome"]["meets_requirements"] is False
+
+
 def test_create_validation_enforces_vm_name_and_cpu_limits():
     validator = CreateValidation()
     vm_resources = [

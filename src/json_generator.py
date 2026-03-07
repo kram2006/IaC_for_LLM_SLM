@@ -136,8 +136,10 @@ def generate_dataset_entry(task_data, terraform_code, execution_results, verific
     spec_passed = execution_results.get('spec_accuracy', {}).get('passed') is True
     iterations = execution_results.get('iterations', 1)
     apply_status = apply_res.get('status')
-    plan_success = plan_res.get('exit_code') == 0 and spec_passed
-    apply_success = apply_status == "success" and apply_res.get('exit_code') == 0 and spec_passed
+    terraform_plan_success = plan_res.get('exit_code') == 0
+    terraform_apply_success = apply_status == "success" and apply_res.get('exit_code') == 0
+    plan_success = terraform_plan_success
+    apply_success = terraform_apply_success
     expected_failure_matched = execution_results.get('expected_failure_matched', False)
     post_state_result = execution_results.get('post_state_verification') or {"status": "not_applicable"}
     post_state_required = post_state_result.get('passed') is not None
@@ -307,7 +309,7 @@ def generate_dataset_entry(task_data, terraform_code, execution_results, verific
             "plan_success": plan_success,
             "apply_success": apply_success,
             "execution_successful": execution_successful,
-            "meets_requirements": expected_failure_matched or (execution_successful and post_state_passed),
+            "meets_requirements": expected_failure_matched or (execution_successful and spec_passed and post_state_passed),
             "resource_allocation_correct": execution_results.get('spec_accuracy', {}).get('passed', True)
         },
         
@@ -326,8 +328,8 @@ def generate_dataset_entry(task_data, terraform_code, execution_results, verific
             "execution": {
                 "terraform_init_success": init_res.get('exit_code') == 0,
                 "terraform_validate_success": val_res.get('exit_code') == 0,
-                "terraform_plan_success": plan_res.get('exit_code') == 0,
-                "terraform_apply_success": apply_success,
+                "terraform_plan_success": terraform_plan_success,
+                "terraform_apply_success": terraform_apply_success,
                 "vm_in_xen_orchestra": verification_data.get('vms_exist_in_xo', False),
                 "vm_running": verification_data.get('all_vms_running', False),
                 "vm_has_correct_ram": _check_vm_ram(actual_memory, verification_data, terraform_code),

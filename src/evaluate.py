@@ -491,9 +491,9 @@ async def main():
             for cleanup_workspace in cleanup_workspaces:
                 await cleanup_workspace_if_state_exists(cleanup_workspace)
         
-        unload_ollama_model(model_config)
-
-    dataset_lock_dir = os.path.join(args.output_dir, "dataset", model_config.get("folder_name", model_name))
+    base_folder_name = model_config.get("folder_name", model_name)
+    effective_lock_folder = f"{base_folder_name}_{args.enhance_strat}" if args.enhance_strat else base_folder_name
+    dataset_lock_dir = os.path.join(args.output_dir, "dataset", effective_lock_folder)
     os.makedirs(dataset_lock_dir, exist_ok=True)
     lockfile_path = os.path.join(dataset_lock_dir, ".evaluation_in_progress")
     if os.path.exists(lockfile_path):
@@ -507,10 +507,10 @@ async def main():
         with open(lockfile_path, "w", encoding="utf-8") as lock_file:
             lock_file.write(f"model={model_name}\n")
 
-        print(f"\n{BOLD}{CYAN}>>> Running {num_passes} samples sequentially...{RESET}")
-        for p in range(pass_start, pass_start + num_passes):
-            await run_sample(p)
+        print(f"\n{BOLD}{CYAN}>>> Running {num_passes} samples in parallel...{RESET}")
+        await asyncio.gather(*(run_sample(p) for p in range(pass_start, pass_start + num_passes)))
     finally:
+        unload_ollama_model(model_config)
         if os.path.exists(lockfile_path):
             os.remove(lockfile_path)
 

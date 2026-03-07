@@ -103,7 +103,7 @@ python src/evaluate.py \
   --no-confirm
 ```
 
-> Important: samples are currently executed sequentially in the evaluator loop. This is the present implementation behavior (parallelization is not active in the current runner path).
+> Important: when `--samples > 1`, the runner now executes samples in parallel with isolated sample workspaces/artifacts.
 
 ### 4.3 Full chain execution (stateful lifecycle)
 
@@ -250,7 +250,7 @@ python llm_judge.py \
 4. **Task ordering / chain policy** (`evaluate.py`)  
    Applies fixed benchmark order and chain fallback rules.
 5. **Sample loop** (`evaluate.py`)  
-   Executes requested `--samples` per task/chain (currently sequential loop).
+   Executes requested `--samples` per task/chain in parallel.
 6. **Workspace and lock management** (`evaluate.py`)  
    Creates output folders and `.evaluation_in_progress`, cleans up at completion.
 

@@ -28,7 +28,7 @@ from evaluate import (
     _preserve_tfstate_snapshot,
     load_config,
 )
-from eval_core import _extract_infra_context_from_tfstate, _resolve_tfstate_context_path
+from eval_core import _extract_infra_context_from_tfstate, _resolve_tfstate_context_path, _verify_vms_with_retry
 from spec_checker import get_plan_json, _extract_vm_resources
 from json_generator import redact_sensitive_text as redact_json_sensitive_text, check_compliance
 from json_generator import generate_dataset_entry
@@ -278,6 +278,15 @@ def test_update_validation_rejects_create_delete_replace():
     assert any("should not create/delete/replace" in e for e in errors)
     assert details.get("had_replace_actions") is True
 
+def test_update_validation_returns_early_when_forbidden_actions_present():
+    validator = UpdateValidation()
+    vm_resources = [{"action": "replace"}]
+    specs = {"updated_field": "cpus", "new_value": 2}
+    errors, checks, _ = validator.validate(vm_resources, specs)
+    assert any("should not create/delete/replace" in e for e in errors)
+    assert all("No update actions found" not in e for e in errors)
+    assert checks == ["action_type_only_update"]
+
 
 def test_update_validation_handles_zero_new_value():
     validator = UpdateValidation()
@@ -294,6 +303,20 @@ def test_read_validation_detects_non_vm_resource_changes():
     errors, checks, _ = validator.validate(changes, {})
     assert "no_resource_changes" in checks
     assert any("must not modify infrastructure" in e for e in errors)
+
+def test_verify_vms_with_retry_retries_and_returns_last_result():
+    class _StubXOClient:
+        def __init__(self):
+            self.calls = 0
+        async def verify_vms(self, force_refresh=False):
+            self.calls += 1
+            return {"actual_vm_count": self.calls, "force_refresh": force_refresh}
+
+    xo_client = _StubXOClient()
+    result = asyncio.run(_verify_vms_with_retry(xo_client, attempts=3, delay_seconds=0))
+    assert xo_client.calls == 3
+    assert result["actual_vm_count"] == 3
+    assert result["force_refresh"] is True
 
 
 def test_delete_validation_enforces_zero_delete_count():

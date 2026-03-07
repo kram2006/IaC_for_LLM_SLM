@@ -23,6 +23,8 @@ MAX_ERROR_HISTORY = 5
 RESOURCE_EXHAUSTION_MARKERS = ('insufficient memory', 'out of memory', 'not enough memory')
 # Normalized-lowercase IDs for fixed benchmark tasks that require dependent context enrichment.
 DEPENDENT_CONTEXT_TASK_IDS = {"u1.2", "d1.2", "r1.2", "d2.2"}
+POST_STATE_RETRY_ATTEMPTS = 3
+POST_STATE_RETRY_DELAY_SECONDS = 2
 
 
 def _resolve_tfstate_context_path(workspace_dir, state_workspace_override=None):
@@ -70,6 +72,16 @@ def _extract_infra_context_from_tfstate(tfstate_path):
 
     return context
 
+async def _verify_vms_with_retry(xo_client, attempts=POST_STATE_RETRY_ATTEMPTS, delay_seconds=POST_STATE_RETRY_DELAY_SECONDS):
+    """Retry XO verification to reduce eventual-consistency false negatives right after apply."""
+    last_result = None
+    total_attempts = max(1, int(attempts or 1))
+    for attempt in range(total_attempts):
+        last_result = await xo_client.verify_vms(force_refresh=True)
+        if attempt < total_attempts - 1:
+            await asyncio.sleep(max(0, delay_seconds))
+    return last_result if last_result is not None else {"actual_vm_count": 0, "vm_details": []}
+
 async def evaluate_task(task, config, client, output_dir, workspace_override=None, initial_history=None, plan_only=False, sample_num=0, chain_index=0, no_confirm=False, enhance_strat="", return_result=False, state_workspace_override=None):
     """
     Core evaluation logic for a single task and sample.
@@ -95,7 +107,8 @@ async def evaluate_task(task, config, client, output_dir, workspace_override=Non
         workspace_dir = workspace_override
         log_step(f"Using shared workspace: {workspace_dir}")
     else:
-        workspace_dir = os.path.join(output_dir, "terraform_code", folder_name, task_id)
+        sample_suffix = f"sample_{sample_num}" if sample_num else "sample_0"
+        workspace_dir = os.path.join(output_dir, "terraform_code", folder_name, task_id, sample_suffix)
         os.makedirs(workspace_dir, exist_ok=True)
 
     # 3. Task Log Directory (Artifacts - Always unique to the current task)
@@ -400,7 +413,7 @@ provider "xenorchestra" {{
         break
 
     if not plan_only:
-        post_verification = await xo_client.verify_vms(force_refresh=True)
+        post_verification = await _verify_vms_with_retry(xo_client)
     else:
         post_verification = {"actual_vm_count": 0, "vm_details": [], "note": "Skipped (plan-only mode)"}
     

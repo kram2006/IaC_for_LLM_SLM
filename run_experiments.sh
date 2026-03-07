@@ -11,6 +11,18 @@ SEED=42
 TASK_CSV="tasks/vm_provisioning_tasks.csv"
 CONFIG="config/openrouter_config.yaml"
 
+resolve_folder_name() {
+    local model_key="$1"
+    python - "$CONFIG" "$model_key" <<'PY'
+import sys, yaml
+config_path, model_key = sys.argv[1], sys.argv[2]
+with open(config_path, "r", encoding="utf-8") as fh:
+    cfg = yaml.safe_load(fh) or {}
+model_cfg = (cfg.get("models") or {}).get(model_key) or {}
+print(model_cfg.get("folder_name") or model_key)
+PY
+}
+
 echo "====== EXPERIMENT 1: Baseline Plan-Only ======"
 for MODEL in "${MODELS[@]}"; do
     echo "Running baseline plan-only for: $MODEL"
@@ -64,9 +76,10 @@ done
 
 echo "====== POST-RUN METRICS ======"
 for MODEL in "${MODELS[@]}"; do
-    python src/compute_metrics.py results/dataset/${MODEL} $TASK_CSV
-    python src/compute_metrics.py results/dataset/${MODEL}_COT $TASK_CSV
-    python src/compute_metrics.py results/dataset/${MODEL}_FSP $TASK_CSV
+    MODEL_FOLDER="$(resolve_folder_name "$MODEL")"
+    python src/compute_metrics.py "results/dataset/${MODEL_FOLDER}" "$TASK_CSV"
+    python src/compute_metrics.py "results/dataset/${MODEL_FOLDER}_COT" "$TASK_CSV"
+    python src/compute_metrics.py "results/dataset/${MODEL_FOLDER}_FSP" "$TASK_CSV"
 done
 
 echo "All experiments complete."

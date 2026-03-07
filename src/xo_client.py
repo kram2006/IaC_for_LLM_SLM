@@ -1,8 +1,12 @@
 import asyncio
-import websockets
 import json
 import logging
 import time
+
+try:
+    import websockets
+except ImportError:  # pragma: no cover - optional dependency
+    websockets = None
 
 class XenOrchestraClient:
     def __init__(self, url, username, password):
@@ -21,6 +25,9 @@ class XenOrchestraClient:
 
     async def _call(self, method, params=None):
         """Internal helper to call JSON-RPC via WebSocket"""
+        if websockets is None:
+            logging.error("websockets is not installed. Install with: pip install websockets")
+            return None
         try:
             async with websockets.connect(self.url, open_timeout=10, close_timeout=5, max_size=25 * 1024 * 1024) as ws:
                 try:

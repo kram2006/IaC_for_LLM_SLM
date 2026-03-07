@@ -215,6 +215,7 @@ def test_compute_metrics_shows_na_for_unavailable_k(capsys):
 
         compute_metrics_for_folder(tmpdir, csv_path)
         out = capsys.readouterr().out
+        assert "Pass@3 (Plan):      N/A" in out
         assert "Pass@3 (Apply):     N/A" in out
         assert "Pass@5 (Spec):      N/A" in out
 
@@ -332,3 +333,78 @@ def test_generate_dataset_entry_marks_plan_only_apply_as_skipped():
     assert entry["validation_checklist"]["execution"]["terraform_apply_success"] is False
     assert entry["resource_expectations"]["expected"]["per_vm_memory_max_bytes"] == 4294967296
     assert entry["resource_expectations"]["expected"]["per_vm_cpus"] == 2
+    assert entry["final_outcome"]["plan_success"] is True
+    assert entry["final_outcome"]["apply_success"] is False
+
+
+def test_generate_dataset_entry_fails_requirements_when_post_state_fails():
+    task = {
+        "task_id": "U1.2",
+        "category": "UPDATE",
+        "prompt_type": "detailed",
+        "prompt": "Increase RAM",
+        "resource_requirements": '{"count": 1, "target_vm": "app-01"}'
+    }
+    execution_results = {
+        "terraform_init": {"exit_code": 0, "execution_time_seconds": 0, "stderr": ""},
+        "terraform_validate": {"exit_code": 0, "execution_time_seconds": 0, "stderr": ""},
+        "terraform_plan": {"exit_code": 0, "execution_time_seconds": 0, "stdout": "Plan: 0 to add, 1 to change", "stderr": ""},
+        "terraform_apply": {"status": "success", "exit_code": 0, "execution_time_seconds": 0, "stderr": ""},
+        "spec_accuracy": {"status": "executed", "passed": True, "errors": [], "checks_performed": []},
+        "post_state_verification": {"status": "executed", "passed": False, "errors": ["vm mismatch"], "details": {}},
+        "iterations": 1,
+        "generation_time": 0,
+        "sample_num": 1,
+        "raw_llm_response": "",
+        "enhance_strat": ""
+    }
+    config = {
+        "active_model_name": "m",
+        "models": {"m": {"id_prefix": "m", "display_name": "Model", "name": "model"}}
+    }
+    entry = generate_dataset_entry(
+        task_data=task,
+        terraform_code='resource "xenorchestra_vm" "a" { memory_max = 6442450944 cpus = 2 size = 10737418240 name_label = "app-01" }',
+        execution_results=execution_results,
+        verification_data={},
+        pre_verification_data={"vm_details": []},
+        config=config
+    )
+    assert entry["final_outcome"]["execution_successful"] is True
+    assert entry["final_outcome"]["meets_requirements"] is False
+
+
+def test_create_validation_enforces_vm_name_and_cpu_limits():
+    validator = CreateValidation()
+    vm_resources = [
+        {"action": "create", "name_label": "web-01", "cpus": 20, "memory_max": 2147483648, "disk_sizes": [1]},
+        {"action": "create", "name_label": "web-03", "cpus": 20, "memory_max": 2147483648, "disk_sizes": [1]},
+    ]
+    specs = {"vm_names": ["web-01", "web-02"], "max_total_cpus": 32}
+    errors, checks, _ = validator.validate(vm_resources, specs)
+    assert "vm_names" in checks
+    assert "total_cpu_limit" in checks
+    assert any("Missing expected VM names" in e for e in errors)
+    assert any("Unexpected VM names created" in e for e in errors)
+    assert any("Total CPUs" in e for e in errors)
+
+
+def test_update_validation_enforces_target_vm():
+    validator = UpdateValidation()
+    vm_resources = [{"action": "update", "memory_max": 1, "name_label": "not-target"}]
+    specs = {"updated_field": "memory_max", "new_value": 1, "target_vm": "app-01"}
+    errors, checks, _ = validator.validate(vm_resources, specs)
+    assert "target_vm" in checks
+    assert any("Expected target VM 'app-01'" in e for e in errors)
+
+
+def test_evaluate_chain_rejects_unknown_task_ids():
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    result = subprocess.run(
+        [sys.executable, "src/evaluate.py", "--model", "phi4_ollama", "--chain", "C1.3,UNKNOWN"],
+        cwd=repo_root,
+        capture_output=True,
+        text=True
+    )
+    assert result.returncode == 0
+    assert "Unknown task IDs in --chain" in result.stdout

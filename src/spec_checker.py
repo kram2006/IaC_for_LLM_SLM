@@ -138,6 +138,11 @@ class CreateValidation(ValidationStrategy):
             total_ram = sum(vm.get('memory_max', 0) or 0 for vm in creates)
             if total_ram > specs['max_total_ram_gb'] * (1024**3):
                 errors.append(f"SPEC ERROR: Total RAM {round(total_ram/(1024**3),2)}GB exceeds limit {specs['max_total_ram_gb']}GB.")
+        if 'max_total_cpus' in specs:
+            checks.append('total_cpu_limit')
+            total_cpus = sum(vm.get('cpus', 0) or 0 for vm in creates)
+            if total_cpus > specs['max_total_cpus']:
+                errors.append(f"SPEC ERROR: Total CPUs {total_cpus} exceeds limit {specs['max_total_cpus']}.")
 
         # Per-VM attribute checks
         for i, vm in enumerate(creates):
@@ -152,6 +157,18 @@ class CreateValidation(ValidationStrategy):
                         actual = vm.get(attr)
                     if actual != specs[spec_key]:
                         errors.append(f"SPEC ERROR: VM {i+1} {attr} mismatch. Expected {specs[spec_key]}, got {actual}.")
+
+        expected_vm_names = specs.get('vm_names') or []
+        if expected_vm_names:
+            checks.append('vm_names')
+            created_names = {vm.get('name_label') for vm in creates if vm.get('name_label')}
+            expected_set = set(expected_vm_names)
+            missing = expected_set - created_names
+            extra = created_names - expected_set
+            if missing:
+                errors.append(f"SPEC ERROR: Missing expected VM names: {sorted(missing)}.")
+            if extra:
+                errors.append(f"SPEC ERROR: Unexpected VM names created: {sorted(extra)}.")
         
         return errors, checks, details
 
@@ -182,6 +199,16 @@ class UpdateValidation(ValidationStrategy):
             for vm in updates:
                 if vm.get(field) != val:
                     errors.append(f"SPEC ERROR: Expected {field}={val}, got {vm.get(field)}.")
+
+        target_vm = specs.get('target_vm')
+        if target_vm:
+            checks.append('target_vm')
+            updated_names = {vm.get('name_label') for vm in updates if vm.get('name_label')}
+            if target_vm not in updated_names:
+                errors.append(f"SPEC ERROR: Expected target VM '{target_vm}' to be updated.")
+            extra_updates = updated_names - {target_vm}
+            if extra_updates:
+                errors.append(f"SPEC ERROR: Unexpected VMs updated: {sorted(extra_updates)}.")
         
         return errors, checks, details
 

@@ -1,17 +1,35 @@
 import json, glob
 from pathlib import Path
 import argparse
+import yaml
+
+DEFAULT_CONFIG = Path("config/openrouter_config.yaml")
+
+def _resolve_model_folder(model_key: str, config_path: Path) -> str:
+    if config_path.exists():
+        with open(config_path, "r", encoding="utf-8") as f:
+            cfg = yaml.safe_load(f) or {}
+        model_cfg = (cfg.get("models") or {}).get(model_key) or {}
+        folder_name = model_cfg.get("folder_name")
+        if folder_name:
+            return folder_name
+    return model_key
 
 parser = argparse.ArgumentParser(description="Verify Phi-4 generated code artifacts.")
 parser.add_argument("--base-dir", default=".", help="Project root directory")
-parser.add_argument("--results-dir", default="results/dataset/Phi4_14B_Ollama_Results", help="Results JSON directory")
-parser.add_argument("--tf-code-dir", default="results/terraform_code/Phi4_14B_Ollama_Results", help="Terraform code artifact directory")
+parser.add_argument("--model", default="phi4_ollama", help="Model key from config/openrouter_config.yaml")
+parser.add_argument("--config", default=str(DEFAULT_CONFIG), help="Path to config file used to resolve folder_name")
+parser.add_argument("--results-dir", default=None, help="Results JSON directory (overrides --model)")
+parser.add_argument("--tf-code-dir", default=None, help="Terraform code artifact directory (overrides --model)")
 parser.add_argument("--out", default="phi4_verify.json", help="Output report JSON path")
 args = parser.parse_args()
 
 BASE = Path(args.base_dir)
-RESULTS = (BASE / args.results_dir).resolve()
-TF_CODE = (BASE / args.tf_code_dir).resolve()
+model_folder = _resolve_model_folder(args.model, BASE / args.config)
+results_dir = args.results_dir or f"results/dataset/{model_folder}"
+tf_code_dir = args.tf_code_dir or f"results/terraform_code/{model_folder}"
+RESULTS = (BASE / results_dir).resolve()
+TF_CODE = (BASE / tf_code_dir).resolve()
 OUT = (BASE / args.out).resolve()
 
 if not RESULTS.exists():

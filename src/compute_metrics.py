@@ -121,7 +121,14 @@ def compute_metrics_for_folder(dataset_folder, task_csv_path):
         if str(reference).lower() == 'nan':
             reference = ''
             
-        apply_ok    = entry.get('final_outcome', {}).get('execution_successful', False)
+        final_outcome = entry.get('final_outcome', {})
+        apply_status = entry.get('execution_results', {}).get('terraform_apply', {}).get('status')
+        apply_ok    = final_outcome.get('apply_success')
+        if apply_ok is None:
+            apply_ok = final_outcome.get('execution_successful', False) and apply_status == 'success'
+        plan_ok = final_outcome.get('plan_success')
+        if plan_ok is None:
+            plan_ok = entry.get('execution_results', {}).get('terraform_plan', {}).get('status') == 'success'
         spec_ok     = entry.get('spec_accuracy', {}).get('passed', False)
         iterations  = entry.get('final_outcome', {}).get('total_iterations', 1)
         gen_time    = entry.get('llm_response', {}).get('time_to_generate_seconds', 0)
@@ -131,6 +138,7 @@ def compute_metrics_for_folder(dataset_folder, task_csv_path):
 
         results.append({
             'task_id':    task_id,
+            'plan_ok':    plan_ok,
             'apply_ok':   apply_ok,
             'spec_ok':    spec_ok,
             'iterations': iterations,
@@ -157,12 +165,14 @@ def compute_metrics_for_folder(dataset_folder, task_csv_path):
     
     total_unique_tasks = len(task_groups)
     
-    # Calculate Pass@1, Pass@3, Pass@5 for both apply and spec
+    # Calculate Pass@1, Pass@3, Pass@5 for plan, apply and spec
     k_values = [1, 3, 5]
+    pass_at_k_plan = {}
     pass_at_k_apply = {}
     pass_at_k_spec = {}
     
     for k in k_values:
+        total_prob_plan = 0
         total_prob_apply = 0
         total_prob_spec = 0
         tasks_with_k_samples = 0
@@ -170,17 +180,21 @@ def compute_metrics_for_folder(dataset_folder, task_csv_path):
         for tid, group in task_groups.items():
             n = len(group)
             if n >= k:
+                c_plan = sum(1 for s in group if s['plan_ok'])
                 c_apply = sum(1 for s in group if s['apply_ok'])
                 c_spec = sum(1 for s in group if s['spec_ok'])
                 
+                total_prob_plan += calculate_pass_at_k(n, c_plan, k)
                 total_prob_apply += calculate_pass_at_k(n, c_apply, k)
                 total_prob_spec += calculate_pass_at_k(n, c_spec, k)
                 tasks_with_k_samples += 1
         
         if tasks_with_k_samples > 0:
+            pass_at_k_plan[k] = total_prob_plan / tasks_with_k_samples
             pass_at_k_apply[k] = total_prob_apply / tasks_with_k_samples
             pass_at_k_spec[k] = total_prob_spec / tasks_with_k_samples
         else:
+            pass_at_k_plan[k] = None
             pass_at_k_apply[k] = None
             pass_at_k_spec[k] = None
 
@@ -201,6 +215,12 @@ def compute_metrics_for_folder(dataset_folder, task_csv_path):
     print(f"  Unique Tasks:       {total_unique_tasks}")
     
     # Display unbiased Pass@k metrics
+    for k in k_values:
+        if k in pass_at_k_plan:
+            if pass_at_k_plan[k] is None:
+                print(f"  Pass@{k} (Plan):      N/A")
+            else:
+                print(f"  Pass@{k} (Plan):      {pass_at_k_plan[k]:.1%}")
     for k in k_values:
         if k in pass_at_k_apply:
             if pass_at_k_apply[k] is None:

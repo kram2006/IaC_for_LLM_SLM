@@ -4,8 +4,12 @@ import requests
 import json
 import logging
 import re
-from huggingface_hub import InferenceClient
 from eval_utils import extract_terraform_code
+
+try:
+    from huggingface_hub import InferenceClient
+except ImportError:  # pragma: no cover - optional dependency
+    InferenceClient = None
 
 PLACEHOLDER_PATTERN = re.compile(r'^\$\{[^}]+\}$')
 
@@ -48,6 +52,9 @@ class OpenRouterClient:
         return self._chat_completion_standard(messages)
 
     def _chat_completion_hf(self, messages):
+        if InferenceClient is None:
+            logging.error("huggingface_hub is not installed. Install with: pip install huggingface_hub")
+            return None
         try:
             # Use model short name from name or the full path from self.model_name
             client = InferenceClient(api_key=self.api_key)

@@ -11,18 +11,34 @@ import os
 import glob
 from pathlib import Path
 import argparse
+import yaml
 
 PREFIX = "code_Phi4_14B_Ollama"
+DEFAULT_CONFIG = Path("config/openrouter_config.yaml")
+
+def _resolve_model_folder(model_key: str, config_path: Path) -> str:
+    if config_path.exists():
+        with open(config_path, "r", encoding="utf-8") as f:
+            cfg = yaml.safe_load(f) or {}
+        model_cfg = (cfg.get("models") or {}).get(model_key) or {}
+        folder_name = model_cfg.get("folder_name")
+        if folder_name:
+            return folder_name
+    return model_key
 
 def main():
     parser = argparse.ArgumentParser(description="Inject Phi-4 results into comparison dataset.")
     parser.add_argument("--base-dir", default=".", help="Project root directory")
-    parser.add_argument("--results-dir", default="results/dataset/Phi4_14B_Ollama_Results", help="Phi-4 result JSON directory")
+    parser.add_argument("--model", default="phi4_ollama", help="Model key from config/openrouter_config.yaml")
+    parser.add_argument("--config", default=str(DEFAULT_CONFIG), help="Path to config file used to resolve folder_name")
+    parser.add_argument("--results-dir", default=None, help="Result directory override")
     parser.add_argument("--comparison-json", default="comparison/comparison_dataset.json", help="Target comparison dataset JSON")
     args = parser.parse_args()
 
     base_dir = Path(args.base_dir)
-    phi4_results_dir = (base_dir / args.results_dir).resolve()
+    model_folder = _resolve_model_folder(args.model, base_dir / args.config)
+    results_dir = args.results_dir or f"results/dataset/{model_folder}"
+    phi4_results_dir = (base_dir / results_dir).resolve()
     comparison_json = (base_dir / args.comparison_json).resolve()
 
     if not comparison_json.exists():

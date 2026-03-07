@@ -116,11 +116,11 @@
 ```python
 plan_json, plan_json_err = get_plan_json(workspace_dir)
 if plan_json is None:
-    spec_res = {"status": "skipped", "passed": None, "errors": [plan_json_err], ...}
-...
+    # ... spec marked as skipped
+    spec_res = {"status": "skipped", "passed": None, "errors": [plan_json_err]}
+# later in the same function:
 log_step("Running terraform apply")
 apply_res = await execute_terraform_apply(workspace_dir, env=tf_env)
-...
 success = True
 ```
 
@@ -234,4 +234,3 @@ csv_path = sys.argv[2] if len(sys.argv) > 2 else "tasks/vm_provisioning_tasks.cs
 2. Align `scripts/verify_phi4_codes.py` with `sample_<n>` artifact structure.
 3. Update README sanity check command for metrics script (or add argparse help support).
 4. Consider consolidating auxiliary metrics scripts around a canonical metrics API.
-

@@ -1,4 +1,4 @@
-# Product Requirements Document (prd.md)
+# Product Requirements Document
 ## IaC_for_LLM_SLM — Backend Evaluation Framework
 
 ## 1) Product Overview

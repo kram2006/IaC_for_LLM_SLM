@@ -4,6 +4,19 @@ Backend-only evaluation framework to benchmark SLMs/LLMs on Terraform generation
 
 ---
 
+## Project implementation readiness
+
+Yes — the repository is implementation-ready once dependencies and credentials are in place.
+
+Use this quick readiness checklist before running benchmark jobs:
+
+- [ ] Install dependencies: `pip install -r requirements.txt`
+- [ ] Confirm core CLIs run: `python src/evaluate.py --help` and `python llm_judge.py --help`
+- [ ] Run regression checks: `python -m pytest tests/test_bug_fixes.py -q` (or full `python -m pytest -q`)
+- [ ] Export required environment variables (`OPENROUTER_API_KEY`, `XO_USERNAME`, `XO_PASSWORD`; optionally `HF_TOKEN`)
+
+---
+
 ## 1) What this project evaluates
 
 - Active benchmark scope: **10 tasks** from `tasks/vm_provisioning_tasks.csv`

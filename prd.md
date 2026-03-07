@@ -1,166 +1,141 @@
-# Product Requirements Document (PRD)
-## IaC_for_LLM_SLM — Backend Evaluation Framework (Target Design)
+# Product Requirements Document (prd.md)
+## IaC_for_LLM_SLM — Backend Evaluation Framework
 
-## 1. Product Overview
-Build a backend-only, reproducible benchmark platform for evaluating SLM/LLM Terraform generation quality across a fixed 10-task CRUD benchmark with dependency chains. The system must be provider-agnostic and produce reliable, comparable experiment outputs.
+## 1) Product Overview
+Build a backend-only benchmark platform that evaluates SLMs/LLMs on Terraform generation for Xen Orchestra workflows using a fixed 10-task CRUD benchmark. The product must provide reproducible experiment execution, strict validation, and audit-friendly artifacts.
 
-## 2. System Goals
-1. Benchmark models fairly across providers (OpenRouter, Ollama, LM Studio-compatible endpoints, HuggingFace).
-2. Evaluate both execution correctness and requirement compliance.
-3. Support lifecycle dependency chains with correct shared-state semantics.
-4. Preserve full experiment traceability (inputs, outputs, logs, metadata).
-5. Enable reproducible and auditable benchmark runs.
+## 2) System Goals
+1. Benchmark model quality consistently across providers.
+2. Enforce semantic correctness, not just syntactic Terraform validity.
+3. Support dependent CRUD chains with deterministic execution flow.
+4. Produce reliable pass/fail and pass@k outputs.
+5. Preserve artifacts/metadata required for technical audit and reproducibility.
 
-## 3. Target Users
-- AI systems engineers benchmarking model families.
-- GenAI researchers comparing prompting strategies.
-- Infra automation engineers validating Terraform-generation safety.
-- MLOps/platform teams integrating benchmark jobs into CI.
+## 3) Target Users
+- AI/LLM evaluation engineers
+- Infra automation engineers
+- GenAI researchers comparing prompting/model variants
+- Platform teams running recurring benchmark jobs in CI
 
-## 4. Supported Model Providers
-Required adapter interface:
-- `chat_completion(messages)`
-- model/provider identity metadata
-- timeout + retry control
-- deterministic seed support when provider permits
-- normalized error categories (`timeout`, `rate_limit`, `auth`, `provider_error`)
+## 4) Supported Model Providers
+Required provider adapters:
+- OpenRouter / OpenAI-compatible APIs
+- Ollama (local endpoint)
+- LM Studio (OpenAI-compatible endpoint mode)
+- HuggingFace inference endpoints
 
-Minimum provider set:
-- OpenRouter/OpenAI-compatible HTTP APIs
-- Ollama local server
-- LM Studio (OpenAI-compatible endpoint)
-- HuggingFace inference API
+Adapter contract requirements:
+- `chat_completion(messages)` interface
+- timeout and retry configuration
+- seed support when provider supports deterministic generation
+- normalized error handling (`auth`, `timeout`, `rate_limit`, `provider_error`)
 
-## 5. Evaluation Pipeline Design
+## 5) Evaluation Pipeline Design
+Canonical pipeline stages:
+1. Task definition load (CSV + task spec YAML)
+2. Prompt construction (baseline/COT/FSP + optional dependent context)
+3. Model execution
+4. Output capture (raw + extracted HCL)
+5. Static validation (`init`, `validate`, `plan`, optional `apply`)
+6. Intent/constraint validation (CRUD-specific rule engine)
+7. Metric calculation (task-level and aggregate)
+8. Result logging (JSON + artifact logs)
+9. Experiment metadata recording (run metadata + model/settings)
 
-### Stage 1 — Task Definition
-- Source of truth: `tasks/vm_provisioning_tasks.csv`
-- Constraint source: `config/task_specs.yaml`
-- Hard fail on schema/task-id mismatch.
+Pipeline requirements:
+- Stage contracts must be explicit.
+- Any failed mandatory stage must propagate to final pass/fail semantics.
+- Error states must be machine-readable in output JSON.
 
-### Stage 2 — Prompt Construction
-- Deterministic prompt assembly from system template + task prompt.
-- Optional strategy layer (`none`, `COT`, `FSP`) must be tagged in outputs.
-
-### Stage 3 — Model Execution
-- Provider adapter call with bounded retries and global timeout.
-- Record raw provider response for each iteration.
-
-### Stage 4 — Output Capture
-- Extract Terraform/HCL deterministically.
-- Persist both raw response and extracted code.
-
-### Stage 5 — Static Validation
-- `terraform init`, `terraform validate`, `terraform plan`.
-- Persist command outputs and exit codes.
-
-### Stage 6 — Intent/Constraint Validation
-- Category strategy checks (CREATE/READ/UPDATE/DELETE) from plan JSON.
-- Post-state verification for stateful tasks where required.
-
-### Stage 7 — Metric Calculation
-- Core metrics:
-  - `plan_success_rate`
-  - `apply_success_rate`
-  - `spec_pass_rate`
-  - `pass@k` (unbiased estimator)
-- Optional semantic metrics (BLEU, CodeBERTScore) as secondary indicators.
-
-### Stage 8 — Result Logging
-- One immutable JSON per task-run sample.
-- Per-task artifacts: prompts, history, terraform logs, screenshots (if any), state snapshots.
-
-### Stage 9 — Experiment Metadata Recording
-- Run manifest required fields:
-  - model key + provider + endpoint
-  - model resolved folder name
-  - seed
-  - dataset hash + config hash
-  - git commit SHA
-  - timestamp (UTC)
-
-## 6. Task Execution Architecture
-
-### Active benchmark set (exactly 10 tasks)
+## 6) Task Execution Architecture
+### 6.1 Fixed benchmark scope (exactly 10 tasks)
 `C1.1, C1.2, C2.2, C5.2, C1.3, U1.2, D1.2, C2.3, R1.2, D2.2`
 
-This list reflects the evaluator's fixed full-benchmark execution order in code (grouped by independent tasks first, then chain tasks).
-
-### Execution groups
-- Independent: `C1.1, C1.2, C2.2, C5.2`
+### 6.2 Required execution groups
+- Independent tasks: `C1.1, C1.2, C2.2, C5.2`
 - Chain 1: `C1.3 -> U1.2 -> D1.2`
 - Chain 2: `C2.3 -> R1.2 -> D2.2`
 
-### Chain requirements
-- Deterministic chain order.
-- Fallback rules must be explicit and test-covered.
-- READ steps may use isolated execution workspace but must resolve dependent context from shared chain state where required.
+### 6.3 Chain requirements
+- Deterministic chain order and fallback policy.
+- Shared state context where dependency requires it.
+- Chain progression should use semantic outcome gates (not execution-only pass).
 
-### State lifecycle requirements
-- Preserve pre-destroy tfstate snapshots as JSON artifacts before cleanup destroy.
-- Keep cleanup behavior deterministic and auditable.
+### 6.4 Workspace requirements
+- Per-run deterministic workspace structure.
+- Per-sample artifact isolation.
+- Cleanup policy must be explicit and auditable.
 
-## 7. Metrics and Benchmarking Strategy
+## 7) Metrics Strategy
+Primary metrics:
+- `plan_success`
+- `apply_success`
+- `spec_pass`
+- `post_state_pass` (when applicable)
+- `meets_requirements`
+- pass@k (unbiased estimator)
 
-### Functional outcome contract
-- `execution_successful`: Terraform execution outcome.
-- `meets_requirements`: `execution_successful AND spec_passed AND post_state_passed` (or expected-failure match logic when task defines expected failure).
-- Always report plan/apply/spec separately.
+pass@k requirements:
+- Formula: `1 - comb(n-c, k)/comb(n, k)`
+- Aggregate by task first, then macro-average
+- Report N/A for tasks with insufficient samples
 
-### pass@k requirements
-- Formula: `1 - C(n-c, k) / C(n, k)`.
-- Compute at task granularity before macro aggregation.
-- Report support counts (`n`) per task for each `k`.
+Secondary (non-gating) metrics:
+- BLEU
+- CodeBERT-based similarity
 
-### Reporting slices
-- Independent tasks only
-- Chain tasks only
-- Overall benchmark
+## 8) Data Flow
+1. Load config, dataset, task specs.
+2. Resolve mode: single task / chain / full benchmark.
+3. For each sample/task:
+   - Build prompt
+   - Call model provider
+   - Extract Terraform
+   - Run Terraform validation and apply path (if enabled)
+   - Run spec + post-state checks
+   - Persist per-task JSON and logs
+4. Aggregate metrics from task JSON artifacts.
+5. Emit run summary and reproducibility metadata.
 
-## 8. Data Flow (Text)
-1. Load config + dataset + task specs.
-2. Resolve benchmark mode (single, chain, full 10-task).
-3. For each sample and task:
-   - Build prompt -> call provider -> extract code.
-   - Run Terraform checks and spec validation.
-   - Run post-state verification when applicable.
-   - Emit task JSON and artifacts.
-4. Aggregate metrics from emitted JSONs.
-5. Emit run summary + manifest.
+## 9) Reproducibility Standards
+Mandatory reproducibility fields:
+- model key/version
+- provider endpoint/base URL
+- seed used per sample
+- benchmark task order used
+- config snapshot/hash
+- dataset version/hash
+- timestamp (UTC)
+- git commit SHA (recommended)
 
-## 9. Reproducibility Requirements
-- Deterministic task ordering and chain policies.
-- Explicit seed propagation and logging.
-- Stable output folder naming (config-driven folder_name).
-- Concurrency lockfile for output dataset folder.
-- Canonical metric implementation path (single source of truth).
+Execution reproducibility requirements:
+- deterministic task order
+- deterministic chain order
+- explicit handling for non-deterministic provider behavior
 
-## 10. System Architecture Diagram (Textual)
+## 10) System Architecture Description
+Textual architecture:
 
-```text
-[CLI Runner]
-  -> [Config + Dataset + Spec Validators]
-  -> [Task Orchestrator (single/chain/full)]
-  -> [Prompt Builder]
-  -> [Provider Adapter]
-  -> [Code Extractor]
-  -> [Terraform Executor]
-  -> [Spec Checker + Post-State Verifier]
-  -> [Result/Artifact Writer + State Snapshotter]
-  -> [Metrics Engine]
-  -> [Run Manifest + Summary Reporter]
-```
+`CLI Orchestrator`  
+→ `Config + Dataset Loader`  
+→ `Task Scheduler (single/chain/full)`  
+→ `Prompt Builder`  
+→ `Provider Adapter`  
+→ `Terraform Executor`  
+→ `Spec/Post-State Validators`  
+→ `Result/Artifact Writer`  
+→ `Metrics Aggregator`  
+→ `Run Summary & Metadata`
 
 Cross-cutting concerns:
-- Structured logging + redaction
-- Timeout/retry policy
-- Lockfile-based write protection
-- Security controls for optional tool downloads/parsing
+- lockfile and run isolation
+- retry/timeout policy
+- sensitive value redaction
+- structured error handling
 
-## 11. Future Improvements
-1. True safe concurrent sampling (or explicit sequential guarantee if retained).
-2. Single canonical metrics package with deprecation path for legacy scripts.
-3. Built-in dataset/spec lint command and CI gate.
-4. Provider capability matrix and compatibility tests.
-5. Replay mode for deterministic re-scoring without rerunning providers.
-6. Chain continuity scorecards and richer failure taxonomy.
+## 11) Future Improvements
+1. Promote semantic validation failures to orchestration-level failure gates.
+2. Unify script ecosystem around one canonical metrics and reporting module.
+3. Add strict run-manifest format with hashes and provenance metadata.
+4. Add a dataset/spec linter command for CI preflight validation.
+5. Add provider capability matrix and smoke tests for all supported providers.

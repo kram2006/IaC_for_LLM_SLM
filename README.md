@@ -116,8 +116,7 @@ python src/evaluate.py \
   --no-confirm
 ```
 
-> Important: when `--samples > 1`, the runner now executes samples in parallel with isolated sample workspaces/artifacts.
-> For large sample counts, consider API/provider rate limits and local CPU/RAM capacity before increasing concurrency (a practical starting point is `--samples 2` to `--samples 4`).
+> Important: when `--samples > 1`, the runner executes each sample sequentially (sample N+1 starts only after sample N fully completes, including VM cleanup). Every sample is fully isolated — no state, workspace, or API client is shared across samples.
 
 ### 4.3 Full chain execution (stateful lifecycle)
 
@@ -145,7 +144,12 @@ python src/evaluate.py \
 
 When `--task_id` and `--chain` are omitted, the runner executes the fixed 10-task benchmark order:
 
-`C1.1, C1.2, C2.2, C5.2, C1.3, U1.2, D1.2, C2.3, R1.2, D2.2`
+`C1.1 → C1.2 → C2.2 → C5.2 → [C1.3→U1.2→D1.2] → [C2.3→R1.2→D2.2]`
+
+Each task or chain group runs **sequentially**. After every task (or chain group) finishes — once all evaluation artifacts (dataset JSON, logs, Terraform files) have been saved — any VMs created are **destroyed** before the next task starts. This ensures each task begins on clean infrastructure.
+
+- **Independent tasks** (`C1.1`, `C1.2`, `C2.2`, `C5.2`): no shared state with each other or with chain groups. VMs destroyed immediately after each one.
+- **Chain groups** (`C1.3→U1.2→D1.2`, `C2.3→R1.2→D2.2`): each task in the group has its own workspace directory and writes its own Terraform code. The `terraform.tfstate` is the only thing that flows between tasks — it is **explicitly copied** into each task's workspace from the last successful task. This lets Terraform see the infrastructure that earlier tasks provisioned (e.g. UPDATE can modify the VM that CREATE built). State fallback: if the intermediate task fails (e.g. U1.2 fails), the cleanup task (D1.2) receives the last successfully applied state (C1.3's state), never a partially-failed state. VMs are destroyed after the entire group completes using the last executed task's workspace.
 
 ```bash
 python src/evaluate.py \
@@ -167,6 +171,119 @@ python src/evaluate.py --model phi4_openrouter --task_id C1.1 --plan-only --enha
 # Few-shot prompting
 python src/evaluate.py --model phi4_openrouter --task_id C1.1 --plan-only --enhance-strat FSP --no-confirm
 ```
+
+---
+
+## 4.6 Experiment types — detailed explanation
+
+This framework supports **three prompt strategies** and a **built-in multi-turn repair mechanism** that is always active. Here is exactly what each one is and when it runs.
+
+---
+
+### Experiment A — Baseline (no `--enhance-strat`)
+
+**What it is:** The model receives the raw task prompt and nothing else.
+
+**How it works:**  
+The user message is prepended with `"Here is the actual prompt: "` and sent directly to the model. No examples, no reasoning hints. This is the control condition — how well does the model generate correct Terraform without any guidance?
+
+**When to use:**  
+Always run Baseline first. It establishes the floor performance for comparison against COT and FSP.
+
+**Command:**
+```bash
+python src/evaluate.py --model phi4_openrouter --task_id C1.1 --plan-only --no-confirm
+# (or explicitly: --enhance-strat "")
+```
+
+---
+
+### Experiment B — Few-Shot Prompting (FSP, `--enhance-strat FSP`)
+
+**What it is:** Two fully-worked Terraform examples are prepended to the user's prompt before the model sees the actual task.
+
+**How it works:**  
+`FSP_prompt()` in `prompt_templates.py` prepends a header and two complete HCL examples (a 2 GB build server and a 4 GB/4-CPU database node — tasks deliberately chosen outside the 10-task test set to avoid data leakage). The model sees:
+
+```
+Here are a few examples of correct Xen Orchestra Terraform configurations:
+
+Example prompt 1: ...
+Example output 1: <complete main.tf>
+
+Example prompt 2: ...
+Example output 2: <complete main.tf>
+
+Here is the actual prompt:
+<task prompt>
+```
+
+The examples show the correct provider block, data source structure, and resource format. The model is expected to copy the pattern.
+
+**When to use:**  
+Use FSP when the model generates structurally wrong code (wrong provider, missing data sources, etc.). The examples anchor the output format.
+
+**Command:**
+```bash
+python src/evaluate.py --model phi4_openrouter --task_id C1.1 --plan-only --enhance-strat FSP --no-confirm
+```
+
+---
+
+### Experiment C — Chain-of-Thought (COT, `--enhance-strat COT`)
+
+**What it is:** Two worked examples with explicit step-by-step reasoning are prepended to the user's prompt.
+
+**How it works:**  
+`CoT_prompt()` in `prompt_templates.py` prepends the same two example tasks as FSP, but each example also includes a reasoning trace: *"Let's think step by step. First, identify the resources… Second, fill in the VM attributes… Third, connect resources together…"*. After the examples the model is told *"Here is the actual prompt to answer. Let's think step by step:"*.
+
+The goal is to encourage the model to reason explicitly before generating code, reducing arithmetic errors (memory in bytes, disk in bytes) and structural mistakes.
+
+**When to use:**  
+Use COT when the model makes logical errors (wrong byte values, missing attributes) rather than purely structural ones. COT helps with tasks that require multi-step reasoning (e.g. "4 GB RAM in bytes = 4 × 1024³ = 4294967296").
+
+**Command:**
+```bash
+python src/evaluate.py --model phi4_openrouter --task_id C1.1 --plan-only --enhance-strat COT --no-confirm
+```
+
+---
+
+### Experiment D — Multi-turn Repair (always active, not a separate flag)
+
+**What it is:** When Terraform fails (init / validate / plan / apply), the framework automatically sends a *repair prompt* and asks the model to fix its own code. This repeats up to 10 times.
+
+**How it works:**  
+`multi_turn_plan_error_prompt()` in `prompt_templates.py` is called on every failure. It builds a **stateless** repair message containing:  
+1. The original task prompt  
+2. The model's broken Terraform code  
+3. The exact Terraform error message  
+4. Requirements for the corrected code  
+
+A fresh message list is created for each repair turn (no growing conversation history), matching the IaC-Eval paper's stateless multi-turn approach. The model gets the full context in one user message.
+
+**This is NOT a separate experiment** — it runs on top of whichever enhance strategy you chose (Baseline, FSP, or COT). If the first generation fails, the multi-turn loop kicks in. If it passes on iteration 1, the loop never runs.
+
+**Metrics tracking:**  
+`iterations_needed` in the dataset JSON records how many turns were needed. `worked_as_generated = true` means iteration 1 succeeded; `worked_after_fixes = true` means a repair turn was needed.
+
+**Key numbers:**
+- Maximum repair turns: **10**  
+- Spec-check failures allowed before stopping: **2**  
+- Error history kept: **last 5 errors** (to avoid unbounded context growth)
+
+---
+
+### Summary table
+
+| Experiment | Flag | What changes | Always active? |
+|---|---|---|---|
+| Baseline | `--enhance-strat ""` (default) | Raw prompt only | ✓ |
+| Few-Shot (FSP) | `--enhance-strat FSP` | 2 worked HCL examples prepended | ✓ |
+| Chain-of-Thought (COT) | `--enhance-strat COT` | 2 step-by-step reasoning examples prepended | ✓ |
+| Multi-turn repair | (no flag) | Automatic self-correction on Terraform failure, up to 10 turns | Always on |
+
+Each experiment produces its own output folder (e.g. `results/dataset/phi4_or_COT/`) so results never mix.
 
 ---
 
@@ -264,7 +381,7 @@ python llm_judge.py \
 4. **Task ordering / chain policy** (`evaluate.py`)  
    Applies fixed benchmark order and chain fallback rules.
 5. **Sample loop** (`evaluate.py`)  
-   Executes requested `--samples` per task/chain in parallel.
+   Executes requested `--samples` per task/chain **sequentially** (sample N+1 starts only after sample N fully completes, including VM cleanup). Within each sample, tasks and chain groups run **sequentially** in fixed order; VMs are destroyed after each task/group before the next begins.
 6. **Workspace and lock management** (`evaluate.py`)  
    Creates output folders and `.evaluation_in_progress`, cleans up at completion.
 

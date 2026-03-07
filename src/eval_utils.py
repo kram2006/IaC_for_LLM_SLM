@@ -152,27 +152,55 @@ def capture_screenshot(task_id, model_name, screenshot_type, screenshot_dir):
 def extract_terraform_code(response_text):
     """
     Extract Terraform/HCL code from LLM response text.
-    Looks for code blocks delimited by triple backticks or returns the full response if no delimiters found.
+
+    Strategy:
+    1. Split on triple-backtick fences.  Every odd-indexed segment (1, 3, 5 …) is
+       a code-block body; even-indexed segments are surrounding prose.
+    2. Strip the optional language tag from the start of each block (hcl / terraform /
+       tf / HCL / Terraform / TF — plus any Windows-style CR LF).  The tag is only
+       stripped when it sits on its own line (i.e. immediately followed by a newline or
+       end-of-string), so that `terraform {` at the top of a config is NOT eaten.
+    3. Return the LAST non-empty code block.  LLMs responding to COT or FSP prompts
+       often echo a worked example first and then write the actual answer; taking the
+       last block avoids returning the example instead of the real code.
+    4. Unclosed blocks (model output truncated by max_tokens) are handled naturally
+       because the odd-index walk still yields the partial block content.
+    5. If no fenced blocks are found, fall back to the full response only when it
+       contains obvious HCL markers — prevents returning plain prose as Terraform code.
     """
     if not response_text:
         return ""
-    
-    delimiters = ["```"]
-    
-    for delim in delimiters:
-        if delim in response_text:
-            parts = response_text.split(delim)
-            if len(parts) >= 3:  # We need at least opening and closing delimiters
-                # Get the first code block (index 1)
-                code = parts[1]
-                # Remove language identifier if present (hcl, terraform, HCL, Terraform, etc.)
-                if code.strip().startswith(("hcl", "terraform", "HCL", "Terraform")):
-                    # Remove first line
-                    lines = code.split("\n", 1)
-                    code = lines[1] if len(lines) > 1 else lines[0]
-                return code.strip()
-    
-    # If no code blocks found, only return text that appears to be Terraform/HCL
+
+    # All language tags that LLMs commonly use for HCL / Terraform files.
+    # Comparison is case-insensitive, so no need to list uppercase variants explicitly.
+    KNOWN_LANG_TAGS = ("hcl", "terraform", "tf")
+
+    if "```" in response_text:
+        parts = response_text.split("```")
+        # Odd indices are code-block bodies; even indices are surrounding text.
+        code_blocks = []
+        for idx in range(1, len(parts), 2):
+            block = parts[idx]
+            stripped_block = block.strip()
+            # Strip the language tag when it is the first "word" on its own line.
+            # Use case-insensitive check so hcl/HCL/Terraform/tf/TF etc. are all handled.
+            block_lower = stripped_block.lower()
+            for tag in KNOWN_LANG_TAGS:
+                if block_lower.startswith(tag):
+                    after_tag = stripped_block[len(tag):]
+                    # Only treat as a language tag if followed by a newline (not by
+                    # a character that makes it a keyword, e.g. `terraform {`).
+                    if after_tag == "" or after_tag[0] in ("\n", "\r"):
+                        stripped_block = after_tag.lstrip("\r\n")
+                    break
+            if stripped_block:
+                code_blocks.append(stripped_block)
+
+        if code_blocks:
+            # Return the LAST block: for COT/FSP responses the real answer is last.
+            return code_blocks[-1]
+
+    # No fenced blocks — return the full response only when it looks like HCL.
     stripped = response_text.strip()
     terraform_markers = ('resource "', 'data "', 'provider "', 'terraform {', 'variable "', 'output "')
     return stripped if any(marker in stripped for marker in terraform_markers) else ""

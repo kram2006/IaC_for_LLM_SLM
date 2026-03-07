@@ -26,6 +26,7 @@ from evaluate import (
     _next_chain_index_after_result,
     _order_fixed_benchmark_tasks,
     _preserve_tfstate_snapshot,
+    _copy_chain_tfstate,
     load_config,
 )
 from eval_core import _extract_infra_context_from_tfstate, _resolve_tfstate_context_path, _verify_vms_with_retry
@@ -38,7 +39,9 @@ from complexity_scorer import score_dataset
 
 
 def test_extract_terraform_code_keeps_non_empty_when_language_line_has_no_newline():
-    assert extract_terraform_code("```hcl```") == "hcl"
+    # A code fence with only a language tag and no body produces no usable code.
+    # The function should return empty string rather than the tag word itself.
+    assert extract_terraform_code("```hcl```") == ""
 
 
 def test_execute_command_timeout_returns_timeout_status():
@@ -598,3 +601,252 @@ def test_preserve_tfstate_snapshot_returns_none_when_tfstate_missing(tmp_path):
     workspace_dir = tmp_path / "workspace"
     workspace_dir.mkdir()
     assert _preserve_tfstate_snapshot(str(workspace_dir), snapshot_label="C1_2_p1") is None
+
+
+# ---------------------------------------------------------------------------
+# Sequential benchmark mode orchestration tests
+# ---------------------------------------------------------------------------
+
+def test_benchmark_mode_uses_sequential_task_execution():
+    """Benchmark mode must execute tasks sequentially (no asyncio.gather over task groups)."""
+    evaluate_source = Path(SRC_DIR, "evaluate.py").read_text(encoding="utf-8")
+    # Sequential path uses direct awaits, not a gathered coroutine list.
+    assert "await asyncio.gather(*all_coroutines)" not in evaluate_source
+    assert "await run_independent_task(task_spec)" in evaluate_source
+    assert "await run_chain_group(chain_group)" in evaluate_source
+
+
+def test_samples_run_sequentially_not_in_parallel():
+    """Samples must run one-after-another; asyncio.gather over samples is strictly forbidden."""
+    evaluate_source = Path(SRC_DIR, "evaluate.py").read_text(encoding="utf-8")
+    # asyncio.gather must not be used to dispatch multiple samples concurrently.
+    assert "asyncio.gather(" not in evaluate_source
+    # The sequential loop must await each sample individually.
+    assert "await run_sample(p)" in evaluate_source
+    # Log message must describe sequential execution, not parallel.
+    assert "sequentially" in evaluate_source
+    assert "in parallel" not in evaluate_source
+
+
+def test_benchmark_mode_independent_task_ids_are_correct():
+    """The four independent task IDs in the benchmark must not belong to any chain group."""
+    from evaluate import PARTIAL_CHAIN_GROUPS_BY_START, FIXED_BENCHMARK_TASK_ORDER, INDEPENDENT_TASK_IDS
+
+    all_chain_ids = set()
+    for group in PARTIAL_CHAIN_GROUPS_BY_START.values():
+        all_chain_ids.update(group)
+
+    benchmark_ids = set(FIXED_BENCHMARK_TASK_ORDER)
+    expected_independent = benchmark_ids - all_chain_ids
+    assert expected_independent == INDEPENDENT_TASK_IDS
+
+
+def test_benchmark_sequential_dispatch_produces_six_groups():
+    """
+    The sequential dispatch loop must produce exactly 6 execution units:
+    4 independent task steps + 2 chain-group steps.
+    """
+    from evaluate import PARTIAL_CHAIN_GROUPS_BY_START, FIXED_BENCHMARK_TASK_ORDER, INDEPENDENT_TASK_IDS
+
+    seen_chain_ids = set()
+    group_labels = []
+    for task_id_normalized in FIXED_BENCHMARK_TASK_ORDER:
+        if task_id_normalized in seen_chain_ids:
+            continue
+        chain_group = PARTIAL_CHAIN_GROUPS_BY_START.get(task_id_normalized)
+        if chain_group:
+            group_labels.append(("chain", tuple(chain_group)))
+            seen_chain_ids.update(chain_group)
+        else:
+            group_labels.append(("independent", task_id_normalized))
+
+    independent_labels = [lbl for kind, lbl in group_labels if kind == "independent"]
+    chain_labels = [lbl for kind, lbl in group_labels if kind == "chain"]
+
+    assert len(group_labels) == 6
+    assert set(independent_labels) == INDEPENDENT_TASK_IDS
+    assert len(chain_labels) == 2
+
+
+def test_benchmark_mode_independent_task_always_destroys_after_completion():
+    """
+    run_independent_task must destroy the workspace after every task, not only for
+    tasks in INDEPENDENT_TASK_IDS. The old guard on INDEPENDENT_TASK_IDS must be absent.
+    """
+    evaluate_source = Path(SRC_DIR, "evaluate.py").read_text(encoding="utf-8")
+    # The old guard conditioned cleanup on task_id membership in INDEPENDENT_TASK_IDS.
+    assert "in INDEPENDENT_TASK_IDS" not in evaluate_source
+
+
+def test_benchmark_mode_chain_group_destroys_workspace_after_completion():
+    """run_chain_group must call cleanup_workspace_if_state_exists on the last task workspace."""
+    evaluate_source = Path(SRC_DIR, "evaluate.py").read_text(encoding="utf-8")
+    # Cleanup uses chain_last_task_workspace (the per-task workspace of the last executed step).
+    assert "await cleanup_workspace_if_state_exists(chain_last_task_workspace)" in evaluate_source
+
+
+def test_explicit_chain_mode_destroys_workspace_after_chain_completes():
+    """The --chain explicit mode must destroy the last task workspace after all tasks finish."""
+    evaluate_source = Path(SRC_DIR, "evaluate.py").read_text(encoding="utf-8")
+    # Both benchmark and explicit-chain modes use chain_last_task_workspace for cleanup.
+    assert "await cleanup_workspace_if_state_exists(chain_last_task_workspace)" in evaluate_source
+
+
+# ---------------------------------------------------------------------------
+# _copy_chain_tfstate helper tests
+# ---------------------------------------------------------------------------
+
+def test_copy_chain_tfstate_copies_state_file(tmp_path):
+    """_copy_chain_tfstate must copy terraform.tfstate from src workspace to dst workspace."""
+    src_ws = tmp_path / "src_ws"
+    dst_ws = tmp_path / "dst_ws"
+    src_ws.mkdir()
+    dst_ws.mkdir()
+    state_content = '{"resources":[{"type":"xenorchestra_vm","instances":[{"attributes":{"id":"abc"}}]}]}'
+    (src_ws / "terraform.tfstate").write_text(state_content, encoding="utf-8")
+
+    _copy_chain_tfstate(str(src_ws), str(dst_ws))
+
+    assert (dst_ws / "terraform.tfstate").exists()
+    assert (dst_ws / "terraform.tfstate").read_text(encoding="utf-8") == state_content
+
+
+def test_copy_chain_tfstate_skips_when_source_absent(tmp_path):
+    """_copy_chain_tfstate must be a no-op when the source state file does not exist."""
+    src_ws = tmp_path / "src_ws"
+    dst_ws = tmp_path / "dst_ws"
+    src_ws.mkdir()
+    dst_ws.mkdir()
+
+    _copy_chain_tfstate(str(src_ws), str(dst_ws))
+
+    assert not (dst_ws / "terraform.tfstate").exists()
+
+
+def test_copy_chain_tfstate_skips_when_source_too_small(tmp_path):
+    """_copy_chain_tfstate must ignore state files that are below TFSTATE_MIN_VALID_BYTES (stub)."""
+    src_ws = tmp_path / "src_ws"
+    dst_ws = tmp_path / "dst_ws"
+    src_ws.mkdir()
+    dst_ws.mkdir()
+    (src_ws / "terraform.tfstate").write_text("{}", encoding="utf-8")  # 2 bytes — stub
+
+    _copy_chain_tfstate(str(src_ws), str(dst_ws))
+
+    assert not (dst_ws / "terraform.tfstate").exists()
+
+
+# ---------------------------------------------------------------------------
+# Per-task workspace and state-passing contract tests
+# ---------------------------------------------------------------------------
+
+def test_chain_tasks_use_per_task_workspaces():
+    """Each chain task must have its own workspace directory (not a single shared dir)."""
+    evaluate_source = Path(SRC_DIR, "evaluate.py").read_text(encoding="utf-8")
+    # Both modes must contain the per-task directory pattern (task_id slug in the path).
+    assert "chain_{chain_slug}_{chain_task_id_slug}_p{pass_num}" in evaluate_source
+    assert "chain_{chain_slug}_{task_id_slug}_p{pass_num}" in evaluate_source
+    # The old shared workspace variable must not be used as an assignment target or in
+    # function calls (ensure it's not in any active code path).
+    import re as _re
+    # Match assignment or function-call usage — not bare comments/docstrings.
+    assert not _re.search(r'\bshared_chain_workspace\s*=', evaluate_source), \
+        "shared_chain_workspace must not be assigned in evaluate.py"
+    assert "cleanup_workspace_if_state_exists(shared_chain_workspace)" not in evaluate_source
+
+
+def test_chain_state_passes_forward_only_on_success():
+    """chain_state_workspace must only be updated after a successful non-READ task."""
+    evaluate_source = Path(SRC_DIR, "evaluate.py").read_text(encoding="utf-8")
+    # The state source advances only when success AND not READ.
+    assert 'chain_result.get("success") and chain_task_category != \'READ\'' in evaluate_source
+    assert 'task_result.get("success") and task_category != \'READ\'' in evaluate_source
+
+
+def test_chain_state_fallback_uses_copy_helper():
+    """_copy_chain_tfstate must be called to pass state into each chain task."""
+    evaluate_source = Path(SRC_DIR, "evaluate.py").read_text(encoding="utf-8")
+    assert "_copy_chain_tfstate(chain_state_workspace, per_task_workspace)" in evaluate_source
+    assert "_copy_chain_tfstate(chain_state_workspace, task_workspace)" in evaluate_source
+
+
+def test_chain_cleanup_uses_last_task_workspace():
+    """Cleanup must use chain_last_task_workspace, not any earlier stale workspace."""
+    evaluate_source = Path(SRC_DIR, "evaluate.py").read_text(encoding="utf-8")
+    assert "await cleanup_workspace_if_state_exists(chain_last_task_workspace)" in evaluate_source
+    # Old variables must not appear in cleanup positions.
+    assert "await cleanup_workspace_if_state_exists(workspace_dir)" not in evaluate_source
+    assert "await cleanup_workspace_if_state_exists(shared_chain_workspace)" not in evaluate_source
+
+
+# ---------------------------------------------------------------------------
+# extract_terraform_code — bug-fix regression tests
+# ---------------------------------------------------------------------------
+
+_VM = 'resource "xenorchestra_vm" "vm" {}'
+
+def test_extract_terraform_code_strips_tf_language_tag():
+    """Bug fix: 'tf' and 'TF' language tags must be stripped, not left in the output."""
+    for tag in ("tf", "TF"):
+        result = extract_terraform_code(f"```{tag}\n{_VM}\n```")
+        assert result == _VM, f"tag '{tag}' was not stripped: {repr(result)}"
+
+    # Code block with no language tag at all must still be extracted correctly.
+    result_no_tag = extract_terraform_code(f"```\n{_VM}\n```")
+    assert result_no_tag == _VM, f"no-tag block broken: {repr(result_no_tag)}"
+
+
+def test_extract_terraform_code_handles_unclosed_fence():
+    """Bug fix: model output truncated by max_tokens leaves an unclosed fence.
+    The function must still return the code without the backtick/tag prefix."""
+    truncated = f"```hcl\n{_VM}"   # no closing ```
+    result = extract_terraform_code(truncated)
+    assert "```" not in result, "backtick prefix leaked into extracted code"
+    assert "hcl" not in result, "language tag leaked into extracted code"
+    assert _VM in result
+
+
+def test_extract_terraform_code_returns_last_block_for_multi_block_response():
+    """Bug fix: when the LLM repeats an example code block before the real answer
+    (common in COT/FSP responses), the LAST code block must be returned."""
+    example_vm = 'resource "xenorchestra_vm" "build_01" { name_label = "build-01" }'
+    real_vm    = 'resource "xenorchestra_vm" "app_01" { name_label = "app-01" }'
+    response = (
+        "Here is a worked example:\n"
+        f"```hcl\n{example_vm}\n```\n\n"
+        "My actual answer:\n"
+        f"```hcl\n{real_vm}\n```"
+    )
+    result = extract_terraform_code(response)
+    assert "app_01" in result,   f"last (real) block not returned; got: {repr(result[:80])}"
+    assert "build_01" not in result, "first (example) block was returned instead of last"
+
+
+def test_extract_terraform_code_does_not_strip_terraform_keyword():
+    """'terraform {' at the top of a config must NOT have its keyword removed."""
+    config = "```\nterraform {\n  required_providers {}\n}\n```"
+    result = extract_terraform_code(config)
+    assert result.startswith("terraform {"), f"terraform keyword stripped: {repr(result[:40])}"
+
+
+def test_extract_terraform_code_handles_leading_newline_before_lang_tag():
+    """Blank line between opening fence and language tag must not leave tag in output.
+    Input structure: ``` ↵ hcl ↵ <code> ``` — 'hcl' is on its own line after the fence."""
+    response = f"```\nhcl\n{_VM}\n```"   # newline THEN hcl THEN code
+    result = extract_terraform_code(response)
+    assert _VM in result, f"code not found in result: {repr(result)}"
+    # The word 'hcl' must not appear at the start of the extracted code.
+    assert not result.startswith("hcl"), f"language tag leaked into start of output: {repr(result[:30])}"
+    # Ensure the tag is gone from the output entirely (not just shifted).
+    assert result.strip() == _VM, f"unexpected content: {repr(result)}"
+
+
+def test_extract_terraform_code_crlf_line_endings():
+    """Windows CRLF line endings inside a code fence must be handled cleanly."""
+    result = extract_terraform_code(f"```hcl\r\n{_VM}\r\n```")
+    assert _VM in result
+
+
+def test_extract_terraform_code_returns_empty_for_plain_prose():
+    """A plain-text response with no HCL markers must return an empty string."""
+    assert extract_terraform_code("I cannot generate Terraform code for this task.") == ""

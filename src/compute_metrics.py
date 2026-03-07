@@ -242,6 +242,26 @@ def compute_metrics_for_folder(dataset_folder, task_csv_path):
         print(f"  Avg CodeBERT-F1:    {avg_cbs_f1:.4f}")
     print(f"{'='*60}\n")
 
+    # Per-task breakdown: metrics are per-task so trends across easy/hard tasks are visible.
+    # Chain tasks (U1.2/D1.2/R1.2/D2.2) share state but are evaluated independently here.
+    print(f"{'='*60}")
+    print(f" PER-TASK BREAKDOWN")
+    print(f"{'='*60}")
+    print(f"  {'Task':<8}  {'N':>3}  {'Plan%':>6}  {'Spec%':>6}  {'AvgIter':>7}  {'BLEU':>6}  {'CBS-F1':>6}")
+    print(f"  {'-'*8}  {'-'*3}  {'-'*6}  {'-'*6}  {'-'*7}  {'-'*6}  {'-'*6}")
+    for tid in sorted(task_groups.keys()):
+        group = task_groups[tid]
+        n = len(group)
+        plan_pct  = sum(1 for r in group if r['plan_ok']) / n
+        spec_pct  = sum(1 for r in group if r['spec_ok'] is True) / n
+        avg_i     = sum(r['iterations'] for r in group) / n
+        t_bleu    = [r['bleu'] for r in group if r['bleu'] is not None]
+        t_cbs     = [r['codebert']['f1'] for r in group if r['codebert'] is not None]
+        bleu_s    = f"{sum(t_bleu)/len(t_bleu):.4f}" if t_bleu else "N/A"
+        cbs_s     = f"{sum(t_cbs)/len(t_cbs):.4f}" if t_cbs else "N/A"
+        print(f"  {tid:<8}  {n:>3}  {plan_pct:>6.1%}  {spec_pct:>6.1%}  {avg_i:>7.2f}  {bleu_s:>6}  {cbs_s:>6}")
+    print(f"{'='*60}\n")
+
     return results
 
 if __name__ == "__main__":

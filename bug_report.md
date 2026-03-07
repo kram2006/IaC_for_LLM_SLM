@@ -1,195 +1,236 @@
-# Bug & Technical Audit Report — IaC_for_LLM_SLM
+# Bug & Technical Audit Report
 
-## 1) Scope, Method, and Constraints
-- Repository audited at: `/home/runner/work/IaC_for_LLM_SLM/IaC_for_LLM_SLM`
-- Files inspected recursively: **53/53** non-`.git` files in working tree (tracked + untracked docs/artifacts present at audit time).
-- Note on prior counts: earlier reports using `git ls-files` showed fewer files because that command only counts tracked files.
-- CI investigation performed via GitHub Actions API for `kram2006/IaC_for_LLM_SLM`:
-  - Recent runs listed.
-  - Latest completed run inspected for jobs.
-  - No failed jobs found in the inspected recent run.
-- Referenced paper `IaC.pdf` was not present in repository checkout, so paper-comparison is based on repository claims/README and implementation behavior.
+## 1) Audit Scope and Method
+- Repository audited: `/home/runner/work/IaC_for_LLM_SLM/IaC_for_LLM_SLM`
+- Inspected scope: source code, configs, scripts, tests, dataset, task specs, reference IaC files, and existing repo docs/artifacts.
+- CI check performed via GitHub Actions MCP for `kram2006/IaC_for_LLM_SLM`:
+  - Recent workflow runs were listed.
+  - No failed jobs were found in inspected recent run(s).
+- `IaC.pdf` was not present in the repository tree in this environment.
 
 ---
 
 ## 2) Architecture Summary
 
-### Core evaluation pipeline
-- `src/evaluate.py`
-  - CLI entrypoint, config/task loading, fixed 10-task ordering, pass sampling loop, chain orchestration, workspace cleanup.
-- `src/eval_core.py`
-  - Per-task execution loop (prompting, retries, Terraform `init/validate/plan/apply`, spec checks, post-state checks, artifact writes).
-- `src/api_client.py`
-  - Provider calls (OpenRouter/OpenAI-compatible, HF inference, local transformers client).
-- `src/spec_checker.py`
-  - CREATE/READ/UPDATE/DELETE strategy validation against Terraform plan JSON.
-- `src/xo_client.py`
-  - Xen Orchestra websocket access + cached VM verification.
-- `src/json_generator.py`
-  - Normalized JSON result records and final outcome semantics.
-- `src/compute_metrics.py`
-  - Task-level aggregation, pass@k, optional BLEU/CodeBERT metrics.
+### Core backend architecture
+- `src/evaluate.py`: CLI orchestration, task selection, fixed 10-task ordering, chain handling, lockfile.
+- `src/eval_core.py`: per-task execution loop (prompting, LLM call, terraform init/validate/plan/apply, retries).
+- `src/api_client.py`: provider adapters (OpenRouter/OpenAI-compatible, HF inference, local transformers).
+- `src/spec_checker.py`: CREATE/READ/UPDATE/DELETE strategy validation from plan JSON.
+- `src/xo_client.py`: Xen Orchestra verification over WebSocket.
+- `src/json_generator.py`: task result JSON schema + output entry generation.
+- `src/compute_metrics.py`: pass@k + BLEU + CodeBERT aggregation.
 
-### Data + specs
-- Task dataset: `tasks/vm_provisioning_tasks.csv`
-- Task constraints: `config/task_specs.yaml`
-- Model/provider config: `config/openrouter_config.yaml`
-- Terraform references: `tasks/references/*.tf`
-
-### Supported 10-task benchmark (verified)
-- Independent: `C1.1, C1.2, C2.2, C5.2`
-- Chain 1: `C1.3 -> U1.2 -> D1.2`
-- Chain 2: `C2.3 -> R1.2 -> D2.2`
+### Data/config layer
+- `tasks/vm_provisioning_tasks.csv`: task dataset
+- `config/task_specs.yaml`: task constraints/specs
+- `tasks/references/*.tf`: reference Terraform snippets
+- `config/openrouter_config.yaml`: model/provider/system settings
 
 ---
 
-## 3) Pipeline Verification Against Expected Benchmark Flow
+## 3) Component-Level Findings
 
-Expected stages:
-1. Task Definition
-2. Prompt Construction
-3. Model Execution
-4. Output Capture
-5. Static Validation
-6. Intent/Constraint Validation
-7. Metric Calculation
-8. Result Logging
-9. Experiment Metadata Recording
+### `src/evaluate.py`
+- Fixed 10-task ordering is explicitly enforced.
+- Chain groups and fallback progression logic are implemented.
+- Lockfile lifecycle exists.
+- **No issues detected in this component.**
 
-Status:
-- 1–8 are implemented and connected in code.
-- Stage 9 is partially implemented (metadata exists in output JSON, but cross-script reproducibility metadata standards are inconsistent).
+### `src/eval_core.py`
+- Core execution loop and retry mechanics are present.
+- Terraform static validation and spec-check integration are present.
+- **Confirmed issue detected** (see Issue #1 below).
 
----
+### `src/spec_checker.py`
+- CRUD strategy pattern implemented and mapped to task categories.
+- Plan parsing and resource extraction logic are clear.
+- **No issues detected in this component.**
 
-## 4) Confirmed Bugs / Weaknesses
+### `src/api_client.py`
+- Retry/backoff and status handling exist for standard HTTP provider path.
+- Seed propagation logic exists.
+- **No issues detected in this component.**
 
-## A. Confirmed implementation/documentation mismatches
+### `src/json_generator.py`
+- Output schema captures plan/apply/spec/post-state fields and metadata.
+- `meets_requirements` semantics include spec/post-state constraints.
+- **No issues detected in this component.**
 
-### A1) README claims parallel pass@k, but evaluator runs samples sequentially
-- **Evidence**
-  - README claims: parallel pass@k (`README.md` features + examples).
-  - Actual execution: sequential `for` loop with `await run_sample(p)` in `src/evaluate.py`.
-- **Impact**
-  - Throughput and runtime expectations are incorrect.
-  - Reported architecture capability is overstated.
-- **Recommended fix (not implemented here)**
-  - Either implement true concurrent sample execution safely, or update README language to “sequential sample execution.”
+### `src/compute_metrics.py`
+- pass@k estimator implementation is correct (Chen et al.-style unbiased form).
+- Handles insufficient sample counts by outputting N/A.
+- **No issues detected in this component.**
 
-### A2) Comparison scripts depend on external assets not shipped in core repo flow
-- **Evidence**
-  - `scripts/evaluate_phi4_vs_each.py`, `scripts/verify_dataset.py`, and inject/verification scripts require `comparison/comparison_dataset.json` and specific derived result structures.
-- **Impact**
-  - Fresh users can see script failures despite core benchmark being healthy.
-- **Recommended fix**
-  - Add explicit preflight checks + README section marking these as optional/offline analysis scripts.
+### `src/xo_client.py`
+- WS login/call flow implemented with timeouts.
+- Force-refresh support exists for consistency-sensitive checks.
+- **No issues detected in this component.**
 
-## B. Architectural and evaluation risks (high-priority)
-
-### B1) Cache staleness risk in post-state validation windows
-- **Evidence**
-  - `src/xo_client.py` uses TTL cache (`_cache_ttl = 10`) with `verify_vms(force_refresh=...)`.
-- **Impact**
-  - In fast CREATE/UPDATE/DELETE sequences, stale XO state can affect post-state checks in edge timing scenarios.
-- **Recommended fix**
-  - Add chain-aware freshness policy (force refresh + retry backoff around post-apply verification).
-
-### B2) Mixed metric stacks in `src/` and `scripts/` can produce divergent results
-- **Evidence**
-  - Canonical metrics in `src/compute_metrics.py`, plus separate metric/evaluation scripts in `scripts/` with different assumptions.
-- **Impact**
-  - Confusingly different benchmark numbers from different entrypoints.
-- **Recommended fix**
-  - Define one canonical metric pipeline and label auxiliary scripts as experimental.
-
-### B3) Reproducibility manifests not standardized across all workflows
-- **Evidence**
-  - Core outputs include useful fields, but there is no single run-manifest schema consistently emitted across all tooling.
-- **Impact**
-  - Harder exact reruns/comparisons across branches/runs.
-- **Recommended fix**
-  - Add run manifest with config hash, dataset hash, model/provider version, seed, git SHA.
-
-## C. Security and operational posture observations
-
-### C1) Reference `.tf` files include placeholder credentials
-- **Evidence**
-  - `tasks/references/*.tf` include `admin` placeholders.
-- **Impact**
-  - Not production secrets, but poor secure-default examples.
-- **Recommended fix**
-  - Replace with explicit placeholders and warning comments in docs.
-
-### C2) Optional-dependency runtime paths should be more explicit
-- **Evidence**
-  - Some features rely on optional extras (HF, code_bert_score, etc.).
-- **Impact**
-  - User confusion when running optional scripts in a minimal environment.
-- **Recommended fix**
-  - Split docs into “core required deps” vs “optional analysis deps.”
+### Auxiliary scripts (`scripts/*.py`, root utility scripts)
+- Utilities are generally functional but inconsistent in maturity.
+- **Confirmed issues detected** in utility/script layer (Issues #2 and #3 below).
 
 ---
 
-## 5) Metric Validation Summary
+## 4) Evaluation Pipeline Verification (Expected 9 Stages)
 
-### pass@k
-- Current formula in `src/compute_metrics.py` is mathematically aligned with the standard unbiased estimator.
-- Aggregation is task-level and then averaged.
+1. **Task Definition** (`evaluate.py` + CSV)  
+   **Implementation appears correct based on the inspected code.**
 
-### Key caution
-- Ensure consumers differentiate:
-  - `plan_success`
-  - `apply_success`
-  - `meets_requirements`
+2. **Prompt Construction** (`eval_core.py` + `prompt_templates.py`)  
+   **Implementation appears correct based on the inspected code.**
 
-The codebase has improved this semantics in result generation, but external scripts must keep the same interpretation to avoid drift.
+3. **Model Execution** (`eval_core.py` + `api_client.py`)  
+   **Implementation appears correct based on the inspected code.**
 
----
+4. **Output Capture** (raw response + extracted HCL + artifact files)  
+   **Implementation appears correct based on the inspected code.**
 
-## 6) Dataset/Task Validation Summary
-- `tasks/vm_provisioning_tasks.csv` contains the active 10-task benchmark rows.
-- Chain logic and fallback behavior are implemented in evaluator orchestration.
-- Dependent-context injection for U1.2/D1.2/R1.2/D2.2 is present.
+5. **Static Validation** (`terraform init/validate/plan`)  
+   **Implementation appears correct based on the inspected code.**
 
----
+6. **Intent/Constraint Validation** (`spec_checker.py`)  
+   Implemented, but see **Issue #1** for a failure-path gap when plan JSON extraction fails.
 
-## 7) Model Execution Validation Summary
-- Provider support present for OpenRouter/OpenAI-compatible, local (Ollama path), and HF inference mode.
-- Timeout/retry handling exists in core API path.
-- Terraform command execution is wrapped with structured status/result outputs.
+7. **Metric Calculation** (`src/compute_metrics.py`)  
+   **Implementation appears correct based on the inspected code.**
 
-Primary gap is not basic functionality but consistency and reproducibility across core vs auxiliary toolchains.
+8. **Result Logging** (`json_generator.py` + logs/history files)  
+   **Implementation appears correct based on the inspected code.**
 
----
-
-## 8) Reproducibility Assessment
-
-Strengths:
-- Fixed 10-task benchmark ordering in full mode.
-- Seed plumbing exists in model config path.
-- Artifact capture and per-task JSON outputs are detailed.
-
-Gaps:
-- Parallelism claim mismatch vs actual sequential execution.
-- No universal run-manifest contract across all scripts.
-- Auxiliary scripts rely on external datasets and assumptions.
+9. **Experiment Metadata Recording** (entry metadata fields in output JSON)  
+   **Implementation appears correct based on the inspected code.**
 
 ---
 
-## 9) Prioritized Remediation Plan (No code changes proposed in this report)
+## 5) Confirmed Issues
 
-1. **Align contract with implementation**
-   - Fix README “parallel samples” claim or implement true safe concurrency.
-2. **Unify metrics pipeline**
-   - Canonicalize `src/compute_metrics.py`; mark script variants as optional/experimental.
-3. **Standardize reproducibility manifest**
-   - Emit a single run-level manifest JSON for every benchmark invocation.
-4. **Harden post-state freshness**
-   - Add refresh/backoff policy around XO verification after apply.
-5. **Improve optional tooling UX**
-   - Document prerequisites and required external assets for comparison scripts.
+## Issue #1
+- **Severity:** High  
+- **Confidence:** Confirmed  
+- **Component:** Evaluation logic (`src/eval_core.py`)  
+- **File:** `src/eval_core.py`
+
+**Evidence snippet:**
+```python
+plan_json, plan_json_err = get_plan_json(workspace_dir)
+if plan_json is None:
+    # ... spec marked as skipped
+    spec_res = {"status": "skipped", "passed": None, "errors": [plan_json_err]}
+# later in the same function:
+log_step("Running terraform apply")
+apply_res = await execute_terraform_apply(workspace_dir, env=tf_env)
+success = True
+```
+
+**Reasoning:**
+When `terraform show -json tfplan` fails, spec validation is marked as skipped, but apply still executes and can set `success = True`. This means task-level success used by orchestration can be true even though intent/spec validation was not executed.
 
 ---
 
-## 10) Final Verdict
-The repository’s **core benchmark engine is functional and structurally solid** for the active 10-task CRUD evaluation. The most meaningful issues are **evaluation-operational consistency** (contract mismatch, multi-tool metric drift, reproducibility metadata standardization), rather than fundamental absence of pipeline stages.
+## Issue #2
+- **Severity:** Medium  
+- **Confidence:** Confirmed  
+- **Component:** Utility verification script  
+- **File:** `scripts/verify_phi4_codes.py`
+
+**Evidence snippet:**
+```python
+tid_lower = tid.lower().replace(".", "_")
+task_dir = TF_CODE / tid_lower
+main_tf = task_dir / "main.tf"
+hist_dir = task_dir / "history"
+```
+
+Paired with artifact layout in evaluator:
+```python
+task_artifact_dir = os.path.join(output_dir, "terraform_code", folder_name, task_id, sample_suffix)
+task_log_dir = os.path.join(task_artifact_dir, "history")
+```
+
+**Reasoning:**
+The script checks `results/terraform_code/<model>/<task>/main.tf`, but evaluator writes artifacts under `.../<task>/sample_<n>/main.tf`. This mismatch can cause false negatives (`main_tf_match=None`, empty history counts) in verification output.
+
+---
+
+## Issue #3
+- **Severity:** Low  
+- **Confidence:** Confirmed  
+- **Component:** Documentation vs CLI behavior  
+- **Files:** `README.md`, `src/compute_metrics.py`
+
+**Evidence snippet (README):**
+```bash
+python src/compute_metrics.py --help
+```
+
+**Evidence snippet (script entrypoint):**
+```python
+folder = sys.argv[1] if len(sys.argv) > 1 else "results/dataset"
+csv_path = sys.argv[2] if len(sys.argv) > 2 else "tasks/vm_provisioning_tasks.csv"
+```
+
+**Reasoning:**
+`src/compute_metrics.py` does not implement argparse/`--help`; passing `--help` is interpreted as a folder path. README “sanity check” is therefore inaccurate.
+
+---
+
+## 6) Potential Risks (Not Confirmed Bugs)
+
+1. **Potential Risk:** Metric fragmentation across multiple standalone scripts vs core `src/compute_metrics.py` may produce non-comparable outputs.  
+   - **Severity:** Medium  
+   - **Confidence:** Potential
+
+2. **Potential Risk:** Reference IaC files and dataset embed lab credentials/placeholders (`admin@admin.net`, `admin`) which are not production-safe examples.  
+   - **Severity:** Low  
+   - **Confidence:** Potential
+
+---
+
+## 7) Metric Validation
+- `src/compute_metrics.py` pass@k uses:
+  - `1 - comb(n-c, k) / comb(n, k)`
+- This is the expected unbiased estimator form for pass@k.
+- Task grouping and k-availability handling (`N/A` when insufficient samples) are implemented.
+
+**Metric implementation appears correct.**
+
+---
+
+## 8) Dataset and Task Validation
+- Dataset contains the active 10-task benchmark.
+- Fixed benchmark execution order in orchestration:
+  - `C1.1, C1.2, C2.2, C5.2, C1.3, U1.2, D1.2, C2.3, R1.2, D2.2`
+- Required chains are represented and orchestrated:
+  - `C1.3 -> U1.2 -> D1.2`
+  - `C2.3 -> R1.2 -> D2.2`
+
+**Implementation appears correct based on the inspected code.**
+
+---
+
+## 9) Model Execution Validation
+- OpenRouter/OpenAI-compatible endpoint support: implemented.
+- HuggingFace inference path: implemented.
+- Local transformers path: implemented.
+- Retry and timeout handling: implemented in model client and command executor.
+
+**Implementation appears correct based on the inspected code.**
+
+---
+
+## 10) Reproducibility Check
+- Deterministic fixed task order is implemented.
+- Seed handling is propagated to clients.
+- Lockfile prevents overlapping writes per dataset/model folder.
+
+**Implementation appears correct based on the inspected code**, with the caveat that script ecosystem consistency can still affect reproducible reporting.
+
+---
+
+## 11) Suggested Improvements
+1. Treat spec-check extraction failure (`plan_json is None`) as task failure for orchestration success semantics.
+2. Align `scripts/verify_phi4_codes.py` with `sample_<n>` artifact structure.
+3. Update README sanity check command for metrics script (or add argparse help support).
+4. Consider consolidating auxiliary metrics scripts around a canonical metrics API.

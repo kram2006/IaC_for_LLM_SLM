@@ -43,6 +43,16 @@ CHAIN_FALLBACK_DELETE_TASK_BY_FAILURE = {
     "c2.3": "d2.2",
     "r1.2": "d2.2",
 }
+FIXED_BENCHMARK_TASK_ORDER = [
+    "c1.1", "c1.2", "c2.2", "c5.2",
+    "c1.3", "u1.2", "d1.2",
+    "c2.3", "r1.2", "d2.2",
+]
+PARTIAL_CHAIN_GROUPS = [
+    ["c1.3", "u1.2", "d1.2"],
+    ["c2.3", "r1.2", "d2.2"],
+]
+PARTIAL_CHAIN_GROUPS_BY_START = {group[0]: group for group in PARTIAL_CHAIN_GROUPS}
 
 def _validate_local_path(path_value, arg_name):
     normalized = os.path.normpath(path_value)
@@ -75,6 +85,14 @@ def _next_chain_index_after_result(tasks, current_index, task_success):
         if str(tasks[idx].get("task_id", "")).strip().lower() == fallback_delete_task_id:
             return idx
     return None
+
+def _order_fixed_benchmark_tasks(dataset_tasks):
+    """Return tasks in fixed benchmark order for the 10-task evaluation scope."""
+    tasks_by_id = {str(row.get("task_id", "")).strip().lower(): row for row in dataset_tasks}
+    missing = [task_id for task_id in FIXED_BENCHMARK_TASK_ORDER if task_id not in tasks_by_id]
+    if missing:
+        raise ValueError(f"Dataset is missing required benchmark tasks: {', '.join(missing)}")
+    return [tasks_by_id[task_id] for task_id in FIXED_BENCHMARK_TASK_ORDER]
 
 def load_config(config_path):
     import re
@@ -241,6 +259,9 @@ async def main():
             return
 
         tasks = [all_tasks_by_id[tid] for tid in chain_ids]
+    elif not args.task_id:
+        # Fixed benchmark mode: deterministic, non-parallel ordered execution.
+        tasks = _order_fixed_benchmark_tasks(dataset_tasks)
 
     # Pass@k Loop
     num_passes = args.samples
@@ -338,8 +359,68 @@ async def main():
                 i = next_index
         else:
             # Standalone mode: Each task gets its own workspace path
+            task_lookup = {str(t.get("task_id", "")).strip().lower(): t for t in tasks}
+            processed_chain_ids = set()
             for task_spec in tasks:
-                tid = task_spec['task_id'].replace('.', '_')
+                task_id_normalized = str(task_spec.get("task_id", "")).strip().lower()
+                if task_id_normalized in processed_chain_ids:
+                    continue
+
+                chain_group = PARTIAL_CHAIN_GROUPS_BY_START.get(task_id_normalized)
+                if chain_group:
+                    chain_tasks = [task_lookup[tid] for tid in chain_group if tid in task_lookup]
+                    if len(chain_tasks) == len(chain_group):
+                        chain_task_names = [t.get('task_id', '').replace('.', '_') for t in chain_tasks]
+                        chain_slug = "_".join(chain_task_names)
+                        if len(chain_slug) > MAX_CHAIN_SLUG_LENGTH:
+                            chain_slug = hashlib.sha256(chain_slug.encode("utf-8")).hexdigest()[:CHAIN_HASH_LENGTH]
+                        shared_chain_workspace = os.path.join(
+                            args.output_dir,
+                            "terraform_code",
+                            effective_folder_name,
+                            f"chain_{chain_slug}_p{pass_num}"
+                        )
+                        os.makedirs(shared_chain_workspace, exist_ok=True)
+                        cleanup_workspaces.append(shared_chain_workspace)
+                        previous_chain_messages = None
+                        i = 0
+                        while i < len(chain_tasks):
+                            chain_task_spec = chain_tasks[i]
+                            chain_task_category = chain_task_spec.get('category', '').strip().upper()
+                            chain_task_plan_only = args.plan_only or (chain_task_category == 'READ')
+                            chain_task_workspace = shared_chain_workspace
+                            if chain_task_category == 'READ':
+                                chain_task_workspace = os.path.join(
+                                    args.output_dir,
+                                    "terraform_code",
+                                    effective_folder_name,
+                                    f"chain_{chain_slug}_read_{chain_task_spec.get('task_id', '').replace('.', '_')}_p{pass_num}"
+                                )
+                                os.makedirs(chain_task_workspace, exist_ok=True)
+                                cleanup_workspaces.append(chain_task_workspace)
+                            chain_result = await evaluate_task(
+                                task=chain_task_spec,
+                                config=expanded_config,
+                                client=client,
+                                output_dir=args.output_dir,
+                                workspace_override=chain_task_workspace,
+                                initial_history=previous_chain_messages,
+                                plan_only=chain_task_plan_only,
+                                sample_num=pass_num,
+                                chain_index=i,
+                                no_confirm=args.no_confirm,
+                                enhance_strat=args.enhance_strat,
+                                return_result=True
+                            )
+                            previous_chain_messages = chain_result.get("messages")
+                            next_index = _next_chain_index_after_result(chain_tasks, i, chain_result.get("success", False))
+                            if next_index is None:
+                                break
+                            i = next_index
+                        processed_chain_ids.update(chain_group)
+                        continue
+
+                tid = task_spec.get('task_id', '').replace('.', '_')
                 sample_workspace = os.path.join(
                     args.output_dir,
                     "terraform_code",
@@ -358,8 +439,10 @@ async def main():
                     sample_num=pass_num,
                     plan_only=args.plan_only,
                     no_confirm=args.no_confirm,
-                    enhance_strat=args.enhance_strat
+                    enhance_strat=args.enhance_strat,
+                    return_result=True
                 )
+                # evaluate_task writes dataset JSON before returning; cleanup must happen strictly after that.
                 if (not args.plan_only) and task_spec.get("task_id", "").strip().lower() in INDEPENDENT_TASK_IDS:
                     await cleanup_workspace_if_state_exists(sample_workspace)
 
@@ -389,17 +472,9 @@ async def main():
         with open(lockfile_path, "w", encoding="utf-8") as lock_file:
             lock_file.write(f"model={model_name}\n")
 
-        if not args.plan_only and num_passes > 1:
-            print(f"\n{BOLD}{CYAN}>>> Running {num_passes} samples sequentially for apply-mode isolation...{RESET}")
-            for p in range(pass_start, pass_start + num_passes):
-                await run_sample(p)
-        else:
-            print(f"\n{BOLD}{CYAN}>>> Launching {num_passes} parallel samples...{RESET}")
-            sample_tasks = [run_sample(p) for p in range(pass_start, pass_start + num_passes)]
-            results = await asyncio.gather(*sample_tasks, return_exceptions=True)
-            exceptions = [result for result in results if isinstance(result, Exception)]
-            if exceptions:
-                raise exceptions[0]
+        print(f"\n{BOLD}{CYAN}>>> Running {num_passes} samples sequentially...{RESET}")
+        for p in range(pass_start, pass_start + num_passes):
+            await run_sample(p)
     finally:
         if os.path.exists(lockfile_path):
             os.remove(lockfile_path)

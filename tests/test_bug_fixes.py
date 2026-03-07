@@ -20,7 +20,7 @@ from eval_utils import redact_sensitive_text as redact_eval_sensitive_text, reda
 from spec_checker import DeleteValidation
 from spec_checker import CreateValidation, ReadValidation, UpdateValidation
 from compute_metrics import compute_metrics_for_folder, calculate_pass_at_k
-from evaluate import _validate_local_path, _next_chain_index_after_result, load_config
+from evaluate import _validate_local_path, _next_chain_index_after_result, _order_fixed_benchmark_tasks, load_config
 from eval_core import _extract_infra_context_from_tfstate
 from spec_checker import get_plan_json, _extract_vm_resources
 from json_generator import redact_sensitive_text as redact_json_sensitive_text, check_compliance
@@ -501,3 +501,18 @@ def test_extract_infra_context_from_tfstate_returns_ids_and_uuids(tmp_path):
     assert context["data_resources"][0]["id"] == "pool-id-1"
     assert context["managed_vms"][0]["id"] == "vm-id-1"
     assert context["managed_vms"][0]["uuid"] == "vm-uuid-1"
+
+
+def test_order_fixed_benchmark_tasks_returns_expected_sequence():
+    task_ids = ["D2.2", "C2.2", "C1.1", "U1.2", "C2.3", "R1.2", "C5.2", "D1.2", "C1.3", "C1.2"]
+    dataset_tasks = [{"task_id": tid} for tid in task_ids]
+    ordered = _order_fixed_benchmark_tasks(dataset_tasks)
+    assert [row["task_id"].lower() for row in ordered] == [
+        "c1.1", "c1.2", "c2.2", "c5.2", "c1.3", "u1.2", "d1.2", "c2.3", "r1.2", "d2.2"
+    ]
+
+
+def test_order_fixed_benchmark_tasks_raises_for_missing_required_task():
+    dataset_tasks = [{"task_id": "C1.1"}, {"task_id": "C1.2"}]
+    with pytest.raises(ValueError, match="missing required benchmark tasks"):
+        _order_fixed_benchmark_tasks(dataset_tasks)
